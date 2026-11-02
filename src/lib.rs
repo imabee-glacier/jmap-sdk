@@ -1,5 +1,5 @@
 #[cfg(not(target_os = "linux"))]
-compile_error!("glacier-mail supports Linux only");
+compile_error!("jmap-sdk supports Linux only");
 pub mod config;
 pub mod jmap;
 pub mod mail;

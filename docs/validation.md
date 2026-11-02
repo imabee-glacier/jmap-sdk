@@ -14,7 +14,7 @@ What has been checked, and what has not. Last run: 2026-11-02, Linux x86_64, Rus
 
 ## Live Stalwart (manual, disposable)
 
-Run against a throwaway `stalwartlabs/stalwart:v1` container with two fixture accounts on an isolated Docker network, using the CLI exactly as an agent would (`glacier-mail call TOOL -`). The container and fixture data were removed afterwards. The test used plain HTTP via the legacy environment path (`GLACIER_ALLOW_HTTP=1`); saved accounts require HTTPS and were covered by the automated tests.
+Run against a throwaway `stalwartlabs/stalwart:v1` container with two fixture accounts on an isolated Docker network, using the CLI exactly as an agent would (`jmap-sdk call TOOL -`). The container and fixture data were removed afterwards. The test used plain HTTP via the legacy environment path (`JMAP_SDK_ALLOW_HTTP=1`); saved accounts require HTTPS and were covered by the automated tests.
 
 Passed:
 
@@ -28,7 +28,7 @@ Passed:
 8. Read/star, create a folder, add a label, archive (the Archive mailbox was **auto-created** because Stalwart had none, and the label was kept), move to trash, restore to inbox, and reject a stale `if_in_state`.
 9. Audit log records the send and mode events.
 
-MCP stdio: `initialize` reports `glacier-mail`, `tools/list` returns 25 tools, and `tools/call` works.
+MCP stdio: `initialize` reports `jmap-sdk`, `tools/list` returns 25 tools, and `tools/call` works.
 
 ## Not verified
 

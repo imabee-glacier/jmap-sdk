@@ -25,7 +25,7 @@ impl Config {
             password: env::var("JMAP_PASSWORD").ok(),
             bearer: env::var("JMAP_TOKEN").ok(),
             account_id: env::var("JMAP_ACCOUNT_ID").ok(),
-            database: env::var_os("GLACIER_DATABASE")
+            database: env::var_os("JMAP_SDK_DATABASE")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| {
                     let base = env::var_os("XDG_STATE_HOME")
@@ -34,9 +34,9 @@ impl Config {
                             env::var_os("HOME").map(|p| PathBuf::from(p).join(".local/state"))
                         })
                         .unwrap_or_else(|| PathBuf::from("."));
-                    base.join("glacier-mail/state.sqlite")
+                    base.join("jmap-sdk/state.sqlite")
                 }),
-            allow_http: env::var("GLACIER_ALLOW_HTTP").as_deref() == Ok("1"),
+            allow_http: env::var("JMAP_SDK_ALLOW_HTTP").as_deref() == Ok("1"),
             max_blob_bytes: 25 * 1024 * 1024,
         };
         config.validate()?;
@@ -50,7 +50,7 @@ impl Config {
         ensure!(
             self.session_url.scheme() == "https"
                 || (self.allow_http && self.session_url.scheme() == "http"),
-            "JMAP requires HTTPS (GLACIER_ALLOW_HTTP=1 is for local tests only)"
+            "JMAP requires HTTPS (JMAP_SDK_ALLOW_HTTP=1 is for local tests only)"
         );
         ensure!(
             self.bearer.as_ref().is_some_and(|s| !s.is_empty())

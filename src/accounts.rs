@@ -17,7 +17,7 @@ use std::{
     sync::Arc,
 };
 use zeroize::Zeroizing;
-const MAGIC: &[u8] = b"GLACIER-VAULT-1\n";
+const MAGIC: &[u8] = b"JMAP-SDK-VAULT-1\n";
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -67,7 +67,7 @@ pub struct Accounts {
 }
 impl Accounts {
     pub fn from_env() -> Self {
-        let directory = std::env::var_os("GLACIER_HOME")
+        let directory = std::env::var_os("JMAP_SDK_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
                 let base = std::env::var_os("XDG_STATE_HOME")
@@ -76,7 +76,7 @@ impl Accounts {
                         std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".local/state"))
                     })
                     .unwrap_or_else(|| PathBuf::from("."));
-                base.join("glacier-mail")
+                base.join("jmap-sdk")
             });
         Self { directory }
     }

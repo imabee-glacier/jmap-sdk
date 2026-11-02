@@ -1,4 +1,4 @@
-# Glacier Mail
+# JMAP SDK
 
 A Linux-only Rust JMAP email tool, replacing `imabee101/stalwart-jmap-mcp`. Meta Muse is the primary target; other agents can use the same tools over stdio MCP.
 
@@ -8,7 +8,7 @@ Status: tested against a live Stalwart server; **not yet validated inside Muse**
 
 ## User workflow
 
-Ask Muse to set up Glacier Mail and follow [the agent guide](docs/muse.md). The user never runs commands.
+Ask Muse to set up JMAP SDK and follow [the agent guide](docs/muse.md). The user never runs commands.
 
 For credentials, prepare a file using [the account template](examples/accounts.template.json), fill it outside the conversation, and make that file available to the agent's filesystem through the available file-transfer mechanism. Tell Muse to import it **without opening or displaying it**. The program reads the file directly, encrypts and verifies its contents, then deletes the local plaintext file. No password is needed in a prompt, command argument, tool result, or secrets-manager integration.
 
@@ -48,28 +48,28 @@ Draft replacement retains the old draft for recovery; trash it after verifying t
 The following commands are for the agent or developer, not the end user. Rust and a C toolchain are needed only to build; SQLite is bundled and TLS uses rustls.
 
 ```sh
-cargo install --locked --git https://github.com/imabee-glacier/glacier-mail
-glacier-mail tools
+cargo install --locked --git https://github.com/imabee-glacier/jmap-sdk
+jmap-sdk tools
 ```
 
-Or from a checkout: `cargo build --release --locked && install -Dm755 target/release/glacier-mail "$HOME/.local/bin/glacier-mail"`.
+Or from a checkout: `cargo build --release --locked && install -Dm755 target/release/jmap-sdk "$HOME/.local/bin/jmap-sdk"`.
 
 Import and inspect accounts:
 
 ```sh
-glacier-mail call import_accounts '{"path":"/absolute/path/accounts.json"}'
-glacier-mail call list_accounts '{}'
-glacier-mail call account_status '{"account":"personal"}'
-glacier-mail call list_identities '{"account":"personal"}'
+jmap-sdk call import_accounts '{"path":"/absolute/path/accounts.json"}'
+jmap-sdk call list_accounts '{}'
+jmap-sdk call account_status '{"account":"personal"}'
+jmap-sdk call list_identities '{"account":"personal"}'
 ```
 
-Use JSON on stdin (`glacier-mail call TOOL -`) for message contents, avoiding shell interpolation. `tools` prints the complete JSON schemas without requiring credentials. Calls return JSON with `ok` and `result`; failures return `ok: false` and a nonzero exit status. Per-object JMAP failures preserve successes and failure maps so the agent can handle partial completion.
+Use JSON on stdin (`jmap-sdk call TOOL -`) for message contents, avoiding shell interpolation. `tools` prints the complete JSON schemas without requiring credentials. Calls return JSON with `ok` and `result`; failures return `ok: false` and a nonzero exit status. Per-object JMAP failures preserve successes and failure maps so the agent can handle partial completion.
 
-Other agents can start `glacier-mail serve` as a stdio MCP server. It uses the official Rust MCP SDK. No network listener is started. Do not assume Muse accepts the same MCP configuration as Muse Code; the primary Muse integration is its agent-executed CLI/custom workflow.
+Other agents can start `jmap-sdk serve` as a stdio MCP server. It uses the official Rust MCP SDK. No network listener is started. Do not assume Muse accepts the same MCP configuration as Muse Code; the primary Muse integration is its agent-executed CLI/custom workflow.
 
 ## Storage and credentials
 
-`GLACIER_HOME` selects the state directory, defaulting to `$XDG_STATE_HOME/glacier-mail` or `$HOME/.local/state/glacier-mail`.
+`JMAP_SDK_HOME` selects the state directory, defaulting to `$XDG_STATE_HOME/jmap-sdk` or `$HOME/.local/state/jmap-sdk`.
 
 - `accounts.enc`: authenticated XChaCha20-Poly1305 encryption with a fresh random nonce for each save.
 - `vault.key`: generated local encryption key; file mode `0600`, directory `0700`.
@@ -77,9 +77,9 @@ Other agents can start `glacier-mail serve` as a stdio MCP server. It uses the o
 
 Atomic replacement, file locking, fsync, and authenticated read-back precede plaintext deletion. Invalid imports keep the source file. A deletion failure is reported explicitly after a successful save. Keep the key and encrypted account file together when moving the installation; losing the key requires importing credentials again. Encryption protects the credential file in isolation, not against someone with access to both files or the running agent VM.
 
-For legacy setups and test harnesses, the binary also accepts `JMAP_SESSION_URL`, `JMAP_TOKEN` or `JMAP_USERNAME`/`JMAP_PASSWORD`, optional `JMAP_ACCOUNT_ID`, and `GLACIER_DATABASE` when no saved account is selected. Saved-account import is the user-facing setup path.
+For legacy setups and test harnesses, the binary also accepts `JMAP_SESSION_URL`, `JMAP_TOKEN` or `JMAP_USERNAME`/`JMAP_PASSWORD`, optional `JMAP_ACCOUNT_ID`, and `JMAP_SDK_DATABASE` when no saved account is selected. Saved-account import is the user-facing setup path.
 
-HTTPS is required for saved accounts. Credentials are sent only to the configured session origin, including discovery redirects and advertised API/upload/download URLs. Fix an incorrect Stalwart public URL rather than silently rewriting it. `GLACIER_ALLOW_HTTP=1` applies only to legacy environment configuration for isolated local tests.
+HTTPS is required for saved accounts. Credentials are sent only to the configured session origin, including discovery redirects and advertised API/upload/download URLs. Fix an incorrect Stalwart public URL rather than silently rewriting it. `JMAP_SDK_ALLOW_HTTP=1` applies only to legacy environment configuration for isolated local tests.
 
 ## Recovery and limits
 

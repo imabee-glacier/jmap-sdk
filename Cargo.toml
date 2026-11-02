@@ -1,13 +1,16 @@
 [package]
-name = "glacier-mail"
+name = "jmap-sdk"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 description = "JMAP email service for Meta Muse and MCP agents"
-repository = "https://github.com/imabee-glacier/glacier-mail"
+repository = "https://github.com/imabee-glacier/jmap-sdk"
 readme = "README.md"
 keywords = ["jmap", "email", "mcp", "agent", "stalwart"]
 publish = false
+
+[workspace]
+members = [".","workspace-hack"]
 
 [dependencies]
 anyhow = "1"
@@ -25,6 +28,7 @@ sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
 url = "2"
+workspace-hack = { version = "0.1", path = "workspace-hack" }
 
 [dev-dependencies]
 axum = "0.8"

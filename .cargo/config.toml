@@ -1,0 +1,11 @@
+# Lighter debug info keeps incremental builds and link times short.
+[profile.dev]
+debug = "line-tables-only"
+
+# Dependencies never need debug info for this workflow.
+[profile.dev.package."*"]
+debug = false
+
+# No linker section: the only target is x86_64-unknown-linux-gnu (rust-lld on
+# Rust >= 1.90) and no rust-toolchain.toml pins an older release. Add clang/lld
+# entries here when a cargo-method cross target is added to TARGETS in scripts/check.

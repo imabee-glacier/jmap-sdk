@@ -1,4 +1,4 @@
-use glacier_mail::{
+use jmap_sdk::{
     jmap::pointer,
     mail::*,
     store::{Store, hash},
@@ -189,7 +189,7 @@ fn hashes_include_bcc_and_patch_paths_escape_ids() {
 }
 #[test]
 fn schemas_deserialize_and_send_is_sensitive() {
-    for definition in glacier_mail::transport::definitions() {
+    for definition in jmap_sdk::transport::definitions() {
         let _: rmcp::model::Tool = serde_json::from_value(definition.clone()).expect("MCP tool");
         if definition["name"] == "send_draft" {
             assert_eq!(definition["annotations"]["readOnlyHint"], false);

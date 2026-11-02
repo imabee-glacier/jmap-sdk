@@ -1,10 +1,10 @@
-# Instructions for the agent operating Glacier Mail
+# Instructions for the agent operating JMAP SDK
 
 You run all commands. The user has no terminal and cannot access your localhost services. Do not create a website, open a browser for setup, or ask the user to run a shell command.
 
 ## Setup
 
-Install with `cargo install --locked --git https://github.com/imabee-glacier/glacier-mail` (see the README). There are no prebuilt release binaries yet. Run `glacier-mail tools` to inspect the current schemas.
+Install with `cargo install --locked --git https://github.com/imabee-glacier/jmap-sdk` (see the README). There are no prebuilt release binaries yet. Run `jmap-sdk tools` to inspect the current schemas.
 
 The user supplies an account file created outside the conversation. Ask only for the available file/path, never for a password pasted into chat. Do **not** `cat`, inspect, summarize, copy, or echo the credential file. Pass its absolute path directly to `import_accounts`. The executable encrypts it and removes the plaintext after verifying the save. If import fails, the file is retained; report the error without reading the file. If import succeeds but deletion fails, remove that specific plaintext source and report the result.
 

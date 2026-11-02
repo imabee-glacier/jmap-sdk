@@ -5,7 +5,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use glacier_mail::{
+use jmap_sdk::{
     config::Config,
     jmap::{CORE, Jmap, MAIL, SUBMISSION},
     service::Service,

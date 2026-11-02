@@ -5,3 +5,4 @@ accounts.json
 accounts.enc
 vault.key
 vault.lock
+dist/

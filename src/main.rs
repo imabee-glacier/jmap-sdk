@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use glacier_mail::{
+use jmap_sdk::{
     accounts::{Accounts, Gateway},
     transport::definitions,
 };
@@ -23,7 +23,7 @@ async fn run() -> Result<()> {
     match args.first().map(String::as_str) {
         None | Some("help" | "--help" | "-h") => {
             println!(
-                "glacier-mail — Linux JMAP tools for agents\n\n  tools                       Print tool schemas (no credentials needed)\n  call TOOL [JSON | -]         Execute one tool; '-' reads JSON from stdin\n  serve                       Run MCP over stdio\n\nMuse runs these commands for the user. No browser or local web service.\nAccounts: import_accounts reads an account file, encrypts it, then deletes the source.\nUse list_accounts and an account argument on mail calls. Storage: GLACIER_HOME.\nEnvironment credentials remain supported for legacy setups. Default send mode: manual."
+                "jmap-sdk — Linux JMAP tools for agents\n\n  tools                       Print tool schemas (no credentials needed)\n  call TOOL [JSON | -]         Execute one tool; '-' reads JSON from stdin\n  serve                       Run MCP over stdio\n\nMuse runs these commands for the user. No browser or local web service.\nAccounts: import_accounts reads an account file, encrypts it, then deletes the source.\nUse list_accounts and an account argument on mail calls. Storage: JMAP_SDK_HOME.\nEnvironment credentials remain supported for legacy setups. Default send mode: manual."
             );
             return Ok(());
         }
@@ -57,7 +57,7 @@ async fn run() -> Result<()> {
             Some(value) => serde_json::from_str::<Value>(value)?,
         };
         let result = service.execute(name, input).await?;
-        let failed = glacier_mail::service::has_partial_failure(&result);
+        let failed = jmap_sdk::service::has_partial_failure(&result);
         println!("{}", json!({"ok":!failed,"result":result}));
         if failed {
             std::process::exit(1);

@@ -1,4 +1,4 @@
-use glacier_mail::accounts::{Accounts, Gateway, ImportAccounts};
+use jmap_sdk::accounts::{Accounts, Gateway, ImportAccounts};
 use serde_json::json;
 use std::{fs, os::unix::fs::PermissionsExt};
 fn write_import(dir: &std::path::Path, accounts: serde_json::Value) -> std::path::PathBuf {

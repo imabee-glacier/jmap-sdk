@@ -1,0 +1,497 @@
+#!/usr/bin/env bash
+# scripts/check — fast scoped checks, a full gate, and release builds.
+#   scripts/check [fast] [flags]            affected crates only
+#   scripts/check gate [flags]              full workspace
+#   scripts/check build [component ...] [--target <triple|all>]
+# Flags: --base <ref> --full --no-fail-fast --force --target <t> (build only)
+# Exit: 0 pass/skip, 1 check failed, 2 usage error or missing tool.
+set -euo pipefail
+
+# ---- Configuration: edit only this block to add components or targets ------
+CONFIG='{
+  "BASE_REF": "origin/main",
+  "FEATURES": "default",
+  "COMPONENTS": [
+    {"name": "jmap-sdk", "crates": ["jmap-sdk"], "targets": ["x86_64-unknown-linux-gnu"]}
+  ],
+  "TARGETS": [
+    {"triple": "x86_64-unknown-linux-gnu", "method": "cargo"}
+  ]
+}'
+# -----------------------------------------------------------------------------
+
+die() { printf '%s\n' "$*" >&2; exit 2; }
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || die "not inside a git repository"
+cd "$ROOT"
+
+if [ -t 1 ]; then RED=$'\033[31m'; GRN=$'\033[32m'; CYN=$'\033[36m'; RST=$'\033[0m'
+else RED=""; GRN=""; CYN=""; RST=""; fi
+
+# ---- Arguments --------------------------------------------------------------
+MODE=fast
+BASE_OVERRIDE=""; FULL=0; NOFF=0; FORCE=0; TARGET_ARG=""
+COMPONENT_ARGS=()
+if [ $# -gt 0 ]; then
+  case "$1" in
+    fast | gate | build) MODE=$1; shift ;;
+  esac
+fi
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --base) [ $# -ge 2 ] || die "--base needs a ref"; BASE_OVERRIDE=$2; shift 2 ;;
+    --full) FULL=1; shift ;;
+    --no-fail-fast) NOFF=1; shift ;;
+    --force) FORCE=1; shift ;;
+    --target)
+      [ "$MODE" = build ] || die "--target is only valid in build mode"
+      [ $# -ge 2 ] || die "--target needs a triple or 'all'"
+      TARGET_ARG=$2; shift 2 ;;
+    -*) die "unknown flag: $1" ;;
+    *)
+      [ "$MODE" = build ] || die "unexpected argument: $1"
+      COMPONENT_ARGS+=("$1"); shift ;;
+  esac
+done
+
+BASE_REF=$(jq -r '.BASE_REF' <<<"$CONFIG")
+FEATURES=$(jq -r '.FEATURES' <<<"$CONFIG")
+case "$FEATURES" in default | all) ;; *) die "FEATURES must be default or all" ;; esac
+FEAT_ARGS=()
+if [ "$FEATURES" = all ] && [ "$MODE" = gate ]; then FEAT_ARGS=(--all-features); fi
+
+HOST=$(rustc -vV | sed -n 's/^host: //p')
+[ -n "$HOST" ] || die "cannot determine host triple from rustc"
+
+export CARGO_TARGET_DIR=target/check
+LOGDIR=target/check-logs
+mkdir -p "$LOGDIR"
+START=$(date +%s)
+
+# ---- Stage bookkeeping ------------------------------------------------------
+FAILED_STAGES=()       # names of failed stages
+FAIL_RERUNS=()         # matching rerun commands
+BG_PIDS=()             # background lane PIDs
+BG_NAMES=()            # background lane names
+BG_RERUN=()            # background lane rerun commands
+BG_START=()            # background lane start times
+BG_MSG=()              # background lane extra failure text
+
+# Rerun hint: the exact command a developer can paste.
+SELF="scripts/check"
+RERUN_BASE="$SELF $MODE"
+[ -n "$BASE_OVERRIDE" ] && RERUN_BASE="$RERUN_BASE --base $BASE_OVERRIDE"
+[ "$FORCE" = 1 ] && RERUN_BASE="$RERUN_BASE --force"
+
+FG_PID=""              # the running foreground (compiling) stage, if any
+
+# Kill a process and all of its descendants (rustc, rustfmt, ...).
+kill_tree() {
+  local child
+  for child in $(pgrep -P "$1" 2>/dev/null || true); do kill_tree "$child"; done
+  kill "$1" 2>/dev/null || true
+}
+# Kill every background lane and the foreground stage, with their children.
+kill_lanes() {
+  local pid
+  for pid in ${BG_PIDS[@]+"${BG_PIDS[@]}"} $FG_PID; do
+    [ -n "$pid" ] || continue
+    kill_tree "$pid"
+  done
+}
+trap 'kill_lanes' EXIT
+trap 'kill_lanes; exit 130' INT TERM
+
+final_fail() {
+  # Last lines of output: one FAIL line per failed stage.
+  local i
+  for ((i = 0; i < ${#FAILED_STAGES[@]}; i++)); do
+    printf '%sFAIL: %s. Rerun: %s%s\n' "$RED" "${FAILED_STAGES[$i]}" "${FAIL_RERUNS[$i]}" "$RST"
+  done
+  exit 1
+}
+
+# Record a failure; stop at once unless --no-fail-fast.
+record_fail() { # name rerun
+  FAILED_STAGES+=("$1"); FAIL_RERUNS+=("$2")
+  if [ "$NOFF" = 0 ]; then
+    kill_lanes
+    BG_PIDS=()
+    final_fail
+  fi
+}
+
+# Run a foreground (compiling) stage: name, rerun command, then the command.
+# Output is captured to a log; passing stages print only [ok].
+run_stage() {
+  local name=$1 rerun=$2 scope=$3; shift 3
+  local log="$LOGDIR/$MODE-$name.log" t0 rc=0
+  printf '%s[run]%s %s (%s)\n' "$CYN" "$RST" "$name" "$scope"
+  t0=$(date +%s)
+  # pipefail makes the pipeline fail with the tool's status.
+  # The stage runs in the background so a failing lane can stop it at once.
+  if [ "$FULL" = 1 ]; then ( set -o pipefail; "$@" 2>&1 | tee "$log" ) & else "$@" >"$log" 2>&1 & fi
+  FG_PID=$!
+  while kill -0 "$FG_PID" 2>/dev/null; do reap_lanes; sleep 0.2; done
+  wait "$FG_PID" || rc=$?
+  FG_PID=""
+  local dt=$(($(date +%s) - t0))
+  if [ "$rc" = 0 ]; then
+    printf '%s[ok]%s %s %ss\n' "$GRN" "$RST" "$name" "$dt"
+    return 0
+  fi
+  [ "$FULL" = 1 ] || cat "$log"
+  printf '%s[FAIL]%s %s %ss\n' "$RED" "$RST" "$name" "$dt"
+  record_fail "$name" "$rerun"
+  return 0
+}
+
+# Start a non-compiling background lane writing to its own log.
+start_lane() { # name rerun message function-name [args...]
+  local name=$1 rerun=$2 msg=$3; shift 3
+  local log="$LOGDIR/$MODE-$name.log"
+  printf '%s[run]%s %s (background)\n' "$CYN" "$RST" "$name"
+  ( "$@" ) >"$log" 2>&1 &
+  BG_PIDS+=("$!"); BG_NAMES+=("$name"); BG_RERUN+=("$rerun")
+  BG_START+=("$(date +%s)"); BG_MSG+=("$msg")
+}
+
+# Reap finished lanes; return 0 always. Fail fast on first failing lane.
+reap_lanes() { # arg "block" waits for all lanes
+  local block=${1:-} i pid alive any
+  while :; do
+    any=0
+    for ((i = 0; i < ${#BG_PIDS[@]}; i++)); do
+      pid=${BG_PIDS[$i]}
+      [ -n "$pid" ] || continue
+      if kill -0 "$pid" 2>/dev/null; then any=1; continue; fi
+      alive=0
+      if wait "$pid" 2>/dev/null; then alive=0; else alive=1; fi
+      BG_PIDS[i]=""
+      local dt=$(($(date +%s) - BG_START[i]))
+      if [ "$alive" = 0 ]; then
+        printf '%s[ok]%s %s %ss\n' "$GRN" "$RST" "${BG_NAMES[$i]}" "$dt"
+      else
+        cat "$LOGDIR/$MODE-${BG_NAMES[$i]}.log"
+        [ -z "${BG_MSG[$i]}" ] || printf '%s\n' "${BG_MSG[$i]}"
+        printf '%s[FAIL]%s %s %ss\n' "$RED" "$RST" "${BG_NAMES[$i]}" "$dt"
+        record_fail "${BG_NAMES[$i]}" "${BG_RERUN[$i]}"
+      fi
+    done
+    [ "$block" = block ] && [ "$any" = 1 ] || break
+    sleep 0.2
+  done
+}
+
+# ---- Preflight --------------------------------------------------------------
+need() { command -v "$1" >/dev/null 2>&1 || die "missing tool: $1 ($2)"; }
+version_ge() { # have want  -> true when have >= want (dotted numerics)
+  local IFS=. a b i
+  read -r -a a <<<"$1"; read -r -a b <<<"$2"
+  for i in 0 1 2; do
+    if [ "${a[$i]:-0}" -gt "${b[$i]:-0}" ]; then return 0; fi
+    if [ "${a[$i]:-0}" -lt "${b[$i]:-0}" ]; then return 1; fi
+  done
+  return 0
+}
+tool_version() { "$@" --version 2>/dev/null | head -1 | sed -n 's/[^0-9]*\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p'; }
+
+need git "install git"
+need jq "install jq"
+need cargo "install Rust via rustup"
+if [ "$MODE" != build ]; then
+  need cargo-hakari "cargo install cargo-hakari --locked"
+  v=$(tool_version cargo hakari)
+  if [ -z "$v" ] || ! version_ge "$v" 0.9.9; then die "cargo-hakari >= 0.9.9 required (found '${v:-unknown}')"; fi
+  need cargo-nextest "cargo install cargo-nextest --locked"
+  v=$(tool_version cargo nextest)
+  if [ -z "$v" ] || ! version_ge "$v" 0.9.89; then die "cargo-nextest >= 0.9.89 required (found '${v:-unknown}')"; fi
+fi
+
+if [ ! -f .config/hakari.toml ]; then
+  cat >&2 <<'MSG'
+.config/hakari.toml is missing. One-time setup:
+  1. cargo hakari init workspace-hack
+  2. In .config/hakari.toml set platforms to the TARGETS triples plus the host triple
+  3. cargo hakari generate
+  4. cargo hakari manage-deps
+  5. cargo hakari verify
+  6. If any crate publishes to crates.io, confirm workspace-hack was made by
+     cargo-hakari 0.9.9 or newer (see the publishing section of the cargo-hakari docs).
+MSG
+  exit 2
+fi
+HACK=$(sed -n 's/^[[:space:]]*hakari-package[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' .config/hakari.toml | head -1)
+[ -n "$HACK" ] || die "hakari-package not set in .config/hakari.toml"
+
+# Linker tools, only when .cargo/config.toml sets a linker for a triple this run builds.
+triples_needing_linker() {
+  local t
+  for t in "$@"; do
+    if [ -f .cargo/config.toml ] && grep -q "^\[target\.$t\]" .cargo/config.toml; then return 0; fi
+  done
+  return 1
+}
+
+META=$(cargo metadata --locked --format-version 1 2>&1) || { printf '%s\n' "$META" >&2; die "cargo metadata --locked failed (stale Cargo.lock?)"; }
+
+# ---- Build mode -------------------------------------------------------------
+if [ "$MODE" = build ]; then
+  need shasum "install perl's shasum"
+  SEL=()
+  if [ ${#COMPONENT_ARGS[@]} -eq 0 ]; then
+    while IFS= read -r n; do SEL+=("$n"); done < <(jq -r '.COMPONENTS[].name' <<<"$CONFIG")
+  else
+    for n in "${COMPONENT_ARGS[@]}"; do
+      jq -e --arg n "$n" '.COMPONENTS[] | select(.name == $n)' <<<"$CONFIG" >/dev/null || die "unknown component: $n"
+      SEL+=("$n")
+    done
+  fi
+  TRIPLES=()
+  if [ "$TARGET_ARG" = all ]; then
+    for n in "${SEL[@]}"; do
+      while IFS= read -r t; do
+        dup=0
+        for e in ${TRIPLES[@]+"${TRIPLES[@]}"}; do [ "$e" = "$t" ] && dup=1; done
+        [ "$dup" = 1 ] || TRIPLES+=("$t")
+      done < <(jq -r --arg n "$n" '.COMPONENTS[] | select(.name == $n) | .targets[]' <<<"$CONFIG")
+    done
+  elif [ -n "$TARGET_ARG" ]; then
+    TRIPLES=("$TARGET_ARG")
+  else
+    TRIPLES=("$HOST")
+  fi
+  if triples_needing_linker "${TRIPLES[@]}"; then need clang "linker settings are configured"; need ld.lld "linker settings are configured"; fi
+  OUT=()
+  for t in "${TRIPLES[@]}"; do
+    method=$(jq -r --arg t "$t" '.TARGETS[] | select(.triple == $t) | .method' <<<"$CONFIG")
+    [ -n "$method" ] || { [ "$t" = "$HOST" ] && method=cargo; }
+    [ -n "$method" ] || die "target $t is not listed in TARGETS"
+    PKGS=()
+    COMPS=()
+    for n in "${SEL[@]}"; do
+      # Only components that ship on this triple.
+      if jq -e --arg n "$n" --arg t "$t" '.COMPONENTS[] | select(.name == $n and (.targets | index($t)))' <<<"$CONFIG" >/dev/null; then
+        COMPS+=("$n")
+        while IFS= read -r c; do PKGS+=(-p "$c"); done < <(jq -r --arg n "$n" '.COMPONENTS[] | select(.name == $n) | .crates[]' <<<"$CONFIG")
+      fi
+    done
+    [ ${#COMPS[@]} -gt 0 ] || continue
+    CMD=(cargo build)
+    [ "$method" = zigbuild ] && CMD=(cargo zigbuild)
+    TARGET_FLAG=()
+    [ "$t" = "$HOST" ] || TARGET_FLAG=(--target "$t")
+    if [ "$t" != "$HOST" ]; then
+      rustup target list --installed 2>/dev/null | grep -qx "$t" || { printf 'FAIL: target %s not installed. Rerun: rustup target add %s\n' "$t" "$t"; exit 1; }
+    fi
+    run_stage "build-$t" "$SELF build --target $t" "${#COMPS[@]} components" \
+      "${CMD[@]}" --release --locked ${TARGET_FLAG[@]+"${TARGET_FLAG[@]}"} "${PKGS[@]}"
+    if [ "$t" = "$HOST" ]; then REL=$CARGO_TARGET_DIR/release; else REL=$CARGO_TARGET_DIR/$t/release; fi
+    for n in "${COMPS[@]}"; do
+      dest=dist/$n/$t
+      made=0
+      # Binary targets of the component's crates, from cargo metadata.
+      while IFS= read -r b; do
+        [ -f "$REL/$b" ] || continue
+        mkdir -p "$dest"
+        cp "$REL/$b" "$dest/$b"
+        made=1
+        OUT+=("$dest/$b")
+      done < <(jq -r --argjson cfg "$CONFIG" --arg n "$n" '
+        ($cfg.COMPONENTS[] | select(.name == $n) | .crates) as $cs
+        | .packages[] | select(.name as $p | $cs | index($p))
+        | .targets[] | select(.kind | index("bin")) | .name' <<<"$META")
+      # Components without binaries (libraries) produce no artifacts.
+      [ "$made" = 1 ] || continue
+      ( cd "$dest" && rm -f SHA256SUMS && shasum -a 256 -- * >SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS )
+    done
+  done
+  [ ${#OUT[@]} -gt 0 ] || die "no binaries produced"
+  for f in "${OUT[@]}"; do printf '%s  %s bytes\n' "$f" "$(wc -c <"$f" | tr -d ' ')"; done
+  printf 'Build mode does not run tests.\n'
+  exit 0
+fi
+
+# ---- Change detection -------------------------------------------------------
+if [ -n "$BASE_OVERRIDE" ]; then BASE_SRC=$BASE_OVERRIDE; else BASE_SRC=$BASE_REF; fi
+git rev-parse --verify --quiet "$BASE_SRC^{commit}" >/dev/null || die "base ref '$BASE_SRC' not found; pass --base <ref>"
+BASE=$(git merge-base HEAD "$BASE_SRC") || die "no merge-base with '$BASE_SRC'; pass --base <ref>"
+
+CHANGED=$( { git diff --name-only --no-renames "$BASE"; git ls-files --others --exclude-standard; } | sort -u | sed '/^$/d' || true)
+
+is_doc() {
+  case "$1" in
+    docs/* | *.md | LICENSE* | */LICENSE* | .github/ISSUE_TEMPLATE/*) return 0 ;;
+  esac
+  return 1
+}
+NONDOC=()
+if [ -n "$CHANGED" ]; then
+  while IFS= read -r f; do is_doc "$f" || NONDOC+=("$f"); done <<<"$CHANGED"
+  if [ ${#NONDOC[@]} -eq 0 ] && [ "$FORCE" = 0 ]; then
+    echo "docs-only: nothing to check"; exit 0
+  fi
+elif [ "$MODE" = fast ] && [ "$FORCE" = 0 ]; then
+  echo "no changes: nothing to check"; exit 0
+fi
+
+touches() { # true when any changed file matches one of the case patterns
+  local f p
+  [ -n "$CHANGED" ] || return 1
+  while IFS= read -r f; do
+    for p in "$@"; do
+      # shellcheck disable=SC2254
+      case "$f" in $p) return 0 ;; esac
+    done
+  done <<<"$CHANGED"
+  return 1
+}
+MANIFESTS_CHANGED=0
+touches 'Cargo.toml' '*/Cargo.toml' 'Cargo.lock' '.config/hakari.toml' && MANIFESTS_CHANGED=1
+
+# Workspace members as "name<TAB>dir-relative-to-root", HACK excluded later.
+MEMBERS=$(jq -r --arg root "$ROOT" '. as $m | .packages[] | select(.id as $i | $m.workspace_members | index($i)) | [.name, (.manifest_path | sub("/Cargo.toml$"; "") | sub("^" + $root + "/?"; ""))] | @tsv' <<<"$META")
+
+AFFECTED=()
+if [ "$MODE" = fast ]; then
+  ALL=0
+  if [ ${#NONDOC[@]} -gt 0 ]; then
+    for f in "${NONDOC[@]}"; do
+      case "$f" in
+        Cargo.lock | Cargo.toml | rust-toolchain* | .cargo/* | .config/nextest.toml | .config/hakari.toml | deny.toml | scripts/check) ALL=1 ;;
+        "$HACK"/Cargo.toml) ALL=1 ;;
+      esac
+    done
+  else
+    ALL=1 # --force with only docs changed: scope everything
+  fi
+  DIRECT=""
+  if [ "$ALL" = 0 ]; then
+    for f in "${NONDOC[@]}"; do
+      # Longest manifest-dir prefix wins; the root package's dir is "".
+      best=""; bestlen=-1
+      while IFS=$'\t' read -r name dir; do
+        if [ -z "$dir" ] || [ "$f" = "$dir" ] || [ "${f#"$dir"/}" != "$f" ]; then
+          if [ ${#dir} -gt "$bestlen" ]; then best=$name; bestlen=${#dir}; fi
+        fi
+      done <<<"$MEMBERS"
+      [ -z "$best" ] || DIRECT="$DIRECT$best"$'\n'
+    done
+  fi
+  # Reverse dependency closure over normal, build and dev edges (workspace members only).
+  CLOSURE=$(jq -r --argjson all "$ALL" --arg direct "$DIRECT" '
+    . as $m
+    | ($m.workspace_members) as $ws
+    | [ $m.packages[] | select(.id as $i | $ws | index($i)) ] as $pk
+    | ($pk | map(.name)) as $names
+    | ($pk | map({key: .name, value: ([.dependencies[].name] | map(select(. as $d | $names | index($d))))}) | from_entries) as $deps
+    | def grow($set): ($set + [ $names[] | select(. as $n | ($deps[$n] // []) | any(. as $d | $set | index($d))) ] | unique);
+      def fix($set): (grow($set)) as $n | if ($n | length) == ($set | length) then $set else fix($n) end;
+      (if $all == 1 then $names else fix(($direct | split("\n") | map(select(length > 0)))) end) | .[]' <<<"$META")
+  while IFS= read -r n; do
+    [ -n "$n" ] && [ "$n" != "$HACK" ] && AFFECTED+=("$n")
+  done <<<"$CLOSURE"
+  [ ${#AFFECTED[@]} -gt 0 ] || { echo "no affected crates: nothing to check"; exit 0; }
+  echo "affected: ${AFFECTED[*]}"
+fi
+
+# Package flags for fast mode.
+PFLAGS=()
+if [ "$MODE" = fast ]; then for n in "${AFFECTED[@]}"; do PFLAGS+=(-p "$n"); done; fi
+
+# Cross-target linker tools (gate only compiles TARGETS).
+if [ "$MODE" = gate ]; then
+  TT=()
+  while IFS= read -r t; do TT+=("$t"); done < <(jq -r '.TARGETS[].triple' <<<"$CONFIG")
+  if triples_needing_linker "${TT[@]}"; then need clang "linker settings are configured"; need ld.lld "linker settings are configured"; fi
+fi
+
+MSG_FMT=(--message-format short)
+[ "$FULL" = 1 ] && MSG_FMT=()
+NOFF_NEXTEST=()
+[ "$NOFF" = 1 ] && NOFF_NEXTEST=(--no-fail-fast)
+
+# ---- Background lane bodies (non-compiling tools only) ----------------------
+lane_fmt() { if [ "$MODE" = fast ]; then cargo fmt "$@" --check; else cargo fmt --all --check; fi; }
+lane_hakari() { cargo hakari generate --diff && cargo hakari manage-deps --dry-run; }
+lane_deny() { cargo deny --locked check; }
+lane_commits() {
+  local re='^(feat|fix|perf|docs|chore|ci|test|style|refactor|build|revert)(\([^)]+\))?!?: .+'
+  local bad=0 sha subj body
+  while IFS= read -r sha; do
+    [ -n "$sha" ] || continue
+    subj=$(git log -1 --format=%s "$sha")
+    body=$(git log -1 --format=%B "$sha")
+    if ! printf '%s\n' "$subj" | grep -Eq "$re"; then
+      printf 'bad subject: %s %s\n' "$(git rev-parse --short "$sha")" "$subj"; bad=1
+    fi
+    if printf '%s\n' "$body" | grep -Fqi -e '[skip ci]' -e '[ci skip]' -e '[no ci]' -e '[skip actions]' -e '[actions skip]' -e 'skip-checks:'; then
+      printf 'skip marker: %s %s\n' "$(git rev-parse --short "$sha")" "$subj"; bad=1
+    fi
+  done < <(git rev-list "$BASE..HEAD")
+  return "$bad"
+}
+
+HAKARI_FIX="Fix: cargo hakari generate && cargo hakari manage-deps"
+
+# ---- Stages -----------------------------------------------------------------
+if [ "$MODE" = fast ]; then
+  start_lane fmt "$RERUN_BASE" "" lane_fmt "${PFLAGS[@]}"
+  if [ "$MANIFESTS_CHANGED" = 1 ]; then start_lane hakari "$RERUN_BASE" "$HAKARI_FIX" lane_hakari; fi
+  SCOPE="${#AFFECTED[@]} crates"
+  run_stage clippy "$RERUN_BASE" "$SCOPE" cargo clippy "${PFLAGS[@]}" --all-targets --locked ${MSG_FMT[@]+"${MSG_FMT[@]}"} -- -D warnings
+  reap_lanes
+  run_stage test "$RERUN_BASE" "$SCOPE" cargo nextest run "${PFLAGS[@]}" --locked --profile fast --no-tests=pass ${NOFF_NEXTEST[@]+"${NOFF_NEXTEST[@]}"}
+  reap_lanes block
+  [ ${#FAILED_STAGES[@]} -eq 0 ] || final_fail
+  printf 'PASS fast in %ss. Not verified: unaffected crates, doc tests, cross-target checks, MSRV, commit messages. Run scripts/check gate before pushing.\n' "$(($(date +%s) - START))"
+  exit 0
+fi
+
+# gate
+start_lane fmt "$RERUN_BASE" "" lane_fmt
+start_lane hakari "$RERUN_BASE" "$HAKARI_FIX" lane_hakari
+start_lane commits "$RERUN_BASE" "" lane_commits
+if [ "$MANIFESTS_CHANGED" = 1 ]; then
+  need cargo-deny "cargo install cargo-deny --locked"
+  start_lane deny "$RERUN_BASE" "" lane_deny
+fi
+run_stage clippy "$RERUN_BASE" workspace cargo clippy --workspace --all-targets --locked ${FEAT_ARGS[@]+"${FEAT_ARGS[@]}"} ${MSG_FMT[@]+"${MSG_FMT[@]}"} -- -D warnings
+reap_lanes
+run_stage test "$RERUN_BASE" workspace cargo nextest run --workspace --locked --profile gate ${FEAT_ARGS[@]+"${FEAT_ARGS[@]}"} ${NOFF_NEXTEST[@]+"${NOFF_NEXTEST[@]}"}
+reap_lanes
+run_stage doctest "$RERUN_BASE" workspace cargo test --doc --workspace --locked ${FEAT_ARGS[@]+"${FEAT_ARGS[@]}"}
+reap_lanes
+
+# Cross-target checks, strictly one after another.
+while IFS= read -r t; do
+  CRATES=()
+  while IFS= read -r c; do
+    [ "$c" = "$HACK" ] || CRATES+=(-p "$c")
+  done < <(jq -r --arg t "$t" '[.COMPONENTS[] | select(.targets | index($t)) | .crates[]] | unique | .[]' <<<"$CONFIG")
+  [ ${#CRATES[@]} -gt 0 ] || continue
+  if ! rustup target list --installed 2>/dev/null | grep -qx "$t"; then
+    echo "target $t is not installed"
+    record_fail "check-$t" "rustup target add $t"
+    continue
+  fi
+  run_stage "check-$t" "$RERUN_BASE" "$((${#CRATES[@]} / 2)) crates" cargo check --target "$t" --locked "${CRATES[@]}"
+done < <(jq -r '.TARGETS[].triple' <<<"$CONFIG")
+
+# MSRV: highest rust-version among workspace members.
+M=$(jq -r '. as $m | [ .packages[] | select(.id as $i | $m.workspace_members | index($i)) | .rust_version | select(. != null) ] | map(split(".") | map(tonumber)) | sort | last // empty | map(tostring) | join(".")' <<<"$META")
+if [ -z "$M" ]; then
+  echo "MSRV: not configured"
+else
+  if ! rustup toolchain list 2>/dev/null | grep -q "^${M}[.-]"; then
+    echo "toolchain $M is missing"
+    echo "rustup toolchain install $M --profile minimal"
+    record_fail "msrv" "rustup toolchain install $M --profile minimal"
+  else
+    CARGO_TARGET_DIR=target/check-msrv run_stage msrv "$RERUN_BASE" workspace cargo "+$M" check --workspace --locked
+  fi
+fi
+
+reap_lanes block
+[ ${#FAILED_STAGES[@]} -eq 0 ] || final_fail
+printf 'PASS gate in %ss.\n' "$(($(date +%s) - START))"

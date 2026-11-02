@@ -376,7 +376,7 @@ pub fn build_email(draft: &Draft, from: Address, mailbox: &str, headers: Value) 
         files.insert(0, body);
         body = json!({"type":"multipart/mixed","subParts":files});
     }
-    let mut email = json!({"mailboxIds":{mailbox:true},"keywords":{"$draft":true,"$seen":true},"from":[from],"to":draft.to,"cc":draft.cc,"bcc":draft.bcc,"subject":draft.subject,"messageId":[format!("{}@glacier-mail.local", uuid::Uuid::new_v4())],"bodyStructure":body,"bodyValues":body_values});
+    let mut email = json!({"mailboxIds":{mailbox:true},"keywords":{"$draft":true,"$seen":true},"from":[from],"to":draft.to,"cc":draft.cc,"bcc":draft.bcc,"subject":draft.subject,"messageId":[format!("{}@jmap-sdk.local", uuid::Uuid::new_v4())],"bodyStructure":body,"bodyValues":body_values});
     if let Some(reply_to) = &draft.reply_to {
         email["replyTo"] = json!(reply_to);
     }
