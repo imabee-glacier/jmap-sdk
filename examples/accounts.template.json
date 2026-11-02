@@ -1,0 +1,16 @@
+{
+  "accounts": [
+    {
+      "name": "personal",
+      "session_url": "https://mail.example.com/.well-known/jmap",
+      "username": "you@example.com",
+      "password": "REPLACE_LOCALLY_WITH_APP_PASSWORD"
+    },
+    {
+      "name": "work",
+      "session_url": "https://work.example.com/.well-known/jmap",
+      "username": "you@work.example.com",
+      "password": "REPLACE_LOCALLY_WITH_APP_PASSWORD"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+/target/
+.env
+*.sqlite*
+accounts.json
+accounts.enc
+vault.key
+vault.lock
