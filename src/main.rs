@@ -23,8 +23,12 @@ async fn run() -> Result<()> {
     match args.first().map(String::as_str) {
         None | Some("help" | "--help" | "-h") => {
             println!(
-                "jmap-sdk — Linux JMAP tools for agents\n\n  tools                       Print tool schemas (no credentials needed)\n  call TOOL [JSON | -]         Execute one tool; '-' reads JSON from stdin\n  serve                       Run MCP over stdio\n\nMuse runs these commands for the user. No browser or local web service.\nAccounts: import_accounts reads an account file, encrypts it, then deletes the source.\nUse list_accounts and an account argument on mail calls. Storage: JMAP_SDK_HOME.\nEnvironment credentials remain supported for legacy setups. Default send mode: manual."
+                "jmap-sdk — Linux JMAP tools for agents\n\n  --version                   Print the version\n  tools                       Print tool schemas (no credentials needed)\n  call TOOL [JSON | -]         Execute one tool; '-' reads JSON from stdin\n  serve                       Run MCP over stdio\n\nMuse runs these commands for the user. No browser or local web service.\nAccounts: import_accounts reads an account file, encrypts it, then deletes the source.\nUse list_accounts and an account argument on mail calls. Storage: JMAP_SDK_HOME.\nEnvironment credentials remain supported for legacy setups. Default send mode: manual."
             );
+            return Ok(());
+        }
+        Some("--version" | "-V" | "version") => {
+            println!("jmap-sdk {}", jmap_sdk::VERSION);
             return Ok(());
         }
         Some("tools") => {
