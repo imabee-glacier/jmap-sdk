@@ -1,0 +1,723 @@
+# One pipeline: lint, check, test, version, build and release for the whole workspace.
+# Local equivalent of the gates/test stages: scripts/check gate
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+
+# Stale PR runs are waste. main and the merge queue always finish: versions come from git tags,
+# so a later main run releases whatever an earlier superseded run would have.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  # Editing this block is all it takes to add a component or a target.
+  # components: name, paths (globs), crates, targets (shipped triples), versioned, publish (crates.io)
+  # targets: name, triple, runner, method (native|zigbuild), tier (1|2), tested, paths (target-only globs)
+  CI_CONFIG: |
+    {
+      "components": [
+        {
+          "name": "jmap-sdk",
+          "paths": ["src/**", "tests/**", "examples/**", "build.rs", "Cargo.toml", "Cargo.lock"],
+          "crates": ["jmap-sdk"],
+          "targets": ["x86_64-unknown-linux-gnu"],
+          "versioned": true,
+          "publish": false
+        }
+      ],
+      "targets": [
+        {
+          "name": "linux",
+          "triple": "x86_64-unknown-linux-gnu",
+          "runner": "ubuntu-latest",
+          "method": "native",
+          "tier": 1,
+          "tested": true,
+          "paths": []
+        }
+      ]
+    }
+
+jobs:
+  # ---------------------------------------------------------------- 1. changes
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      skip: ${{ steps.plan.outputs.skip }}
+      deps_changed: ${{ steps.plan.outputs.deps_changed }}
+      components: ${{ steps.plan.outputs.components }}
+      targets: ${{ steps.plan.outputs.targets }}
+      crates: ${{ steps.plan.outputs.crates }}
+      check_matrix: ${{ steps.plan.outputs.check_matrix }}
+      test_matrix: ${{ steps.plan.outputs.test_matrix }}
+      warm_matrix: ${{ steps.plan.outputs.warm_matrix }}
+      has_check: ${{ steps.plan.outputs.has_check }}
+      has_test: ${{ steps.plan.outputs.has_test }}
+      has_warm: ${{ steps.plan.outputs.has_warm }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain >/dev/null 2>&1 || rustup toolchain install
+      - name: Plan
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          # Diff base per event; an unusable base (new branch, force push) means "everything changed".
+          case "$EVENT" in
+            pull_request) base="$PR_BASE"; dots="..." ;;
+            merge_group) base="$MERGE_GROUP_BASE"; dots="..." ;;
+            *) base="$PUSH_BEFORE"; dots=" " ;;
+          esac
+          all_flag=false
+          if [[ -n "$base" && ! "$base" =~ ^0+$ ]] && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            if [[ "$dots" == "..." ]]; then
+              git diff --name-only --no-renames "${base}...HEAD" > changed.txt
+            else
+              git diff --name-only --no-renames "$base" HEAD > changed.txt
+            fi
+          else
+            echo "No usable diff base; treating every file as changed."
+            git ls-files > changed.txt
+            all_flag=true
+          fi
+          echo "Changed files:"; sed 's/^/  /' changed.txt
+
+          cargo metadata --locked --no-deps --format-version 1 > meta.json
+          hack="$(sed -n 's/^hakari-package *= *"\(.*\)"/\1/p' .config/hakari.toml)"
+
+          cat > plan.jq <<'JQ'
+          def g2r: "^" + (gsub("\\.";"\\.") | gsub("\\*\\*/";"\u0001") | gsub("\\*\\*";"\u0002")
+                    | gsub("\\*";"[^/]*") | gsub("\u0001";"(.*/)?") | gsub("\u0002";".*")) + "$";
+          def anyglob($globs): . as $f | any($globs[]; . as $g | $f | test($g | g2r));
+          def pstr: map("-p " + .) | join(" ");
+          $cfg.components as $comps | $cfg.targets as $tgts
+          | ["docs/**", "**/*.md", "LICENSE*", ".github/ISSUE_TEMPLATE/**"] as $docs
+          | ($files | map(select(anyglob($docs) | not))) as $code
+          | $meta.workspace_root as $root
+          | ($meta.packages | map(select(.name != $hack) | {
+              name, deps: [.dependencies[].name],
+              dir: (.manifest_path | sub("/Cargo\\.toml$"; "") | if . == $root then "" else ltrimstr($root + "/") end)
+            })) as $pk
+          | ($pk | map(.name)) as $allcrates
+          | def crate_of($f):
+              [$pk[] | . as $p | select($p.dir == "" or ($f | startswith($p.dir + "/")))]
+              | sort_by(.dir | length) | last | .name;
+            def rdeps($start):
+              reduce range(0; ($pk | length) + 1) as $i ($start;
+                . as $cur | ($cur + [$pk[] | select(.deps | any(.[]; . as $d | $cur | any(.[]; . == $d))) | .name]) | unique);
+            def has($list; $x): any($list[]; . == $x);
+          ($comps | map(.crates[]) | unique) as $owned
+          | [ "Cargo.lock", "rust-toolchain.toml", ($hack + "/Cargo.toml"), ".config/hakari.toml",
+              ".cargo/config.toml", ".config/nextest.toml", ".github/workflows/ci.yml" ] as $triggers
+          | ($code | map(crate_of(.)) | map(select(. != null)) | unique) as $touched
+          | ($comps | map(select(. as $c | any($code[]; anyglob($c.paths))))) as $pathcomps
+          | ($touched + ($pathcomps | map(.crates[])) | unique) as $seed
+          | ($all_flag
+             or any($code[]; IN($triggers[]))
+             or any($touched[]; . as $t | has($owned; $t) | not)) as $all
+          | (($code | length) == 0 and ($all_flag | not)) as $skip
+          | (if $skip then [] elif $all then $allcrates else rdeps($seed) end) as $crates
+          | ($comps | map(select(.crates | any(.[]; . as $c | has($crates; $c))))) as $acomps
+          | ($tgts | map(select(. as $t | any($acomps[]; has(.targets; $t.triple))))) as $atgts
+          | def crates_for($t):
+              [$acomps[] | select(has(.targets; $t.triple)) | .crates[]] | unique | map(select(. as $c | has($crates; $c)));
+            def allcrates_for($t):
+              [$comps[] | select(has(.targets; $t.triple)) | .crates[]] | unique;
+            def entry($t; $cr): {name: $t.name, triple: $t.triple, runner: $t.runner, method: $t.method,
+                                  tier: $t.tier, crates: ($cr | pstr)};
+          ([ $tgts[] | select(.tier != 1) | . as $t
+             | select($event == "merge_group" or ($event == "pull_request" and any($files[]; anyglob($t.paths))))
+             | crates_for($t) as $cr | select(($cr | length) > 0) | entry($t; $cr) ]) as $check
+          | ([ $tgts[] | select(.tier == 1) | . as $t | select(($crates | length) > 0) | entry($t; $crates) ]
+             + [ $tgts[] | select(.tier != 1 and .tested and $event == "merge_group") | . as $t
+                 | crates_for($t) as $cr | select(($cr | length) > 0) | entry($t; $cr) ]) as $test0
+          | (if $event == "push" then [] else $test0 end) as $test
+          | (if $event == "push" and ($skip | not) then
+               [ $tgts[] | select(.tier != 1) | . as $t | entry($t; allcrates_for($t)) + {kind: "check"} ]
+               + [ $tgts[] | select(.tested) | . as $t
+                   | entry($t; if .tier == 1 then $allcrates else allcrates_for($t) end) + {kind: "test"} ]
+             else [] end) as $warm
+          | {
+              skip: $skip,
+              deps_changed: ($all_flag or any($files[]; test("(^|/)Cargo\\.toml$") or . == "Cargo.lock" or . == ".config/hakari.toml")),
+              components: ($acomps | map(.name)),
+              targets: ($atgts | map(.name)),
+              crates: ($crates | pstr),
+              check_matrix: {include: $check}, test_matrix: {include: $test}, warm_matrix: {include: $warm},
+              has_check: (($check | length) > 0), has_test: (($test | length) > 0), has_warm: (($warm | length) > 0)
+            }
+          JQ
+          jq -n -c \
+            --argjson cfg "$CI_CONFIG" \
+            --argjson meta "$(cat meta.json)" \
+            --argjson files "$(jq -R -s 'split("\n") | map(select(length > 0))' changed.txt)" \
+            --arg hack "$hack" --arg event "$EVENT" --argjson all_flag "$all_flag" \
+            -f plan.jq > plan.json
+          jq . plan.json
+          jq -r 'to_entries[] | "\(.key)=\(.value | if type == "string" then . else tojson end)"' plan.json >> "$GITHUB_OUTPUT"
+          rm -f plan.jq plan.json meta.json changed.txt
+
+  # ------------------------------------------------------------------ 2. gates
+  gates:
+    needs: changes
+    if: needs.changes.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 1 }}
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain >/dev/null 2>&1 || rustup toolchain install
+      # Hits when this key was saved by an earlier run on main (PRs and the queue only restore).
+      # main lints with --workspace, so its saved target dir covers every crate a PR can touch.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        id: cache
+        with:
+          shared-key: x86_64-unknown-linux-gnu-lint
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: echo "rust-cache hit - ${{ steps.cache.outputs.cache-hit }}"
+      - name: Format
+        # cargo fmt takes no --locked; it never resolves dependencies.
+        run: cargo fmt --all --check
+      - name: Clippy (also compile-checks Tier 1)
+        env:
+          EVENT: ${{ github.event_name }}
+          CRATES: ${{ needs.changes.outputs.crates }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT" == "push" ]]; then
+            cargo clippy --all-targets --locked --workspace -- -D warnings
+          elif [[ -n "$CRATES" ]]; then
+            read -ra pkgs <<<"$CRATES"
+            cargo clippy --all-targets --locked "${pkgs[@]}" -- -D warnings
+          else
+            echo "No affected crates."
+          fi
+      - name: Install cargo-deny
+        if: needs.changes.outputs.deps_changed == 'true'
+        uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
+        with:
+          tool: cargo-deny
+          fallback: none
+      - name: Install cargo-hakari
+        # Not in install-action's manifest list, so it uses its binstall fallback (never cargo install).
+        if: needs.changes.outputs.deps_changed == 'true'
+        uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
+        with:
+          tool: cargo-hakari
+      - name: Dependency policy
+        if: needs.changes.outputs.deps_changed == 'true'
+        run: cargo deny --locked check
+      - name: Workspace-hack is in sync
+        if: needs.changes.outputs.deps_changed == 'true'
+        run: |
+          # hakari resolves from Cargo.lock offline and has no --locked flag.
+          if ! { cargo hakari generate --diff && cargo hakari manage-deps --dry-run; }; then
+            echo "Fix: cargo hakari generate && cargo hakari manage-deps"
+            exit 1
+          fi
+      - name: Commit messages
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          subject_re='^(feat|fix|perf|docs|chore|ci|test|style|refactor|build|revert)(\([^)]+\))?!?: .+'
+          # GitHub silently drops runs containing these, leaving required checks pending forever.
+          skip_re='\[skip ci\]|\[ci skip\]|\[no ci\]|\[skip actions\]|\[actions skip\]|skip-checks:'
+          bad=0
+          for sha in $(git rev-list --no-merges "${BASE}..${HEAD}"); do
+            subject="$(git log -1 --format=%s "$sha")"
+            if ! [[ "$subject" =~ $subject_re ]]; then
+              echo "::error::${sha:0:9}: subject is not a conventional commit: ${subject}"
+              bad=1
+            fi
+            if git log -1 --format=%B "$sha" | grep -qiE "$skip_re"; then
+              echo "::error::${sha:0:9}: contains a CI skip string"
+              bad=1
+            fi
+          done
+          exit "$bad"
+
+  # ------------------------------------------------------------- 3. check-targets
+  check-targets:
+    needs: [changes, gates]
+    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.has_check == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: true
+      max-parallel: 6
+      matrix: ${{ fromJSON(needs.changes.outputs.check_matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain >/dev/null 2>&1 || rustup toolchain install
+      # Hits on the key warm-cache saves on main for this triple; one leg per triple, so no key is shared.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        id: cache
+        with:
+          shared-key: ${{ matrix.triple }}-check
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: echo "rust-cache hit - ${{ steps.cache.outputs.cache-hit }}"
+      - name: cargo check
+        env:
+          TRIPLE: ${{ matrix.triple }}
+          CRATES: ${{ matrix.crates }}
+        run: |
+          read -ra pkgs <<<"$CRATES"
+          cargo check --target "$TRIPLE" --locked "${pkgs[@]}"
+
+  # ------------------------------------------------------------------- 4. test
+  test:
+    needs: [changes, gates]
+    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.has_test == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: true
+      max-parallel: 6
+      matrix: ${{ fromJSON(needs.changes.outputs.test_matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain >/dev/null 2>&1 || rustup toolchain install
+      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
+        with:
+          tool: cargo-nextest
+          fallback: none
+      - name: Linker dependencies
+        env:
+          TRIPLE: ${{ matrix.triple }}
+        run: |
+          if [[ "$RUNNER_OS" == "Linux" ]] && grep -qF "[target.${TRIPLE}]" .cargo/config.toml; then
+            sudo apt-get update && sudo apt-get install -y clang lld
+          fi
+      # Hits on the key warm-cache saves on main (it builds the same test artifacts with --no-run).
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        id: cache
+        with:
+          shared-key: ${{ matrix.triple }}-test
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: echo "rust-cache hit - ${{ steps.cache.outputs.cache-hit }}"
+      - name: nextest
+        env:
+          CRATES: ${{ matrix.crates }}
+        run: |
+          read -ra pkgs <<<"$CRATES"
+          cargo nextest run --locked --profile gate "${pkgs[@]}"
+      - name: Doctests
+        if: github.event_name == 'merge_group' && matrix.tier == 1
+        run: cargo test --doc --locked --workspace
+
+  # ------------------------------------------------------------------- 5. msrv
+  msrv:
+    needs: [changes, gates]
+    if: github.event_name == 'merge_group' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain >/dev/null 2>&1 || rustup toolchain install
+      - name: Highest rust-version among members
+        id: msrv
+        run: |
+          set -euo pipefail
+          m="$(cargo metadata --locked --no-deps --format-version 1 |
+            jq -r '[.packages[].rust_version | select(. != null) | split(".") | map(tonumber)]
+                   | if length == 0 then "" else max | map(tostring) | join(".") end')"
+          echo "version=${m}" >> "$GITHUB_OUTPUT"
+          if [[ -z "$m" ]]; then echo "MSRV: not configured"; else echo "MSRV: ${m}"; fi
+      - name: Install MSRV toolchain
+        if: steps.msrv.outputs.version != ''
+        env:
+          M: ${{ steps.msrv.outputs.version }}
+        run: rustup toolchain install "$M" --profile minimal
+      # Hits on the msrv key saved by main. It carries M, so a changed MSRV starts a fresh cache.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        id: cache
+        if: steps.msrv.outputs.version != ''
+        with:
+          shared-key: x86_64-unknown-linux-gnu-msrv
+          key: ${{ steps.msrv.outputs.version }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cache result
+        if: steps.msrv.outputs.version != ''
+        run: echo "rust-cache hit - ${{ steps.cache.outputs.cache-hit }}"
+      - name: cargo check on MSRV
+        if: steps.msrv.outputs.version != ''
+        env:
+          M: ${{ steps.msrv.outputs.version }}
+        run: cargo "+${M}" check --workspace --locked
+
+  # ------------------------------------------------------------- 6. warm-cache
+  warm-cache:
+    needs: [changes, gates]
+    if: github.event_name == 'push' && needs.changes.outputs.has_warm == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: true
+      max-parallel: 6
+      # One leg per target and kind, so every leg owns its own key.
+      matrix: ${{ fromJSON(needs.changes.outputs.warm_matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain >/dev/null 2>&1 || rustup toolchain install
+      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
+        if: matrix.kind == 'test'
+        with:
+          tool: cargo-nextest
+          fallback: none
+      - name: Linker dependencies
+        env:
+          TRIPLE: ${{ matrix.triple }}
+        run: |
+          if [[ "$RUNNER_OS" == "Linux" ]] && grep -qF "[target.${TRIPLE}]" .cargo/config.toml; then
+            sudo apt-get update && sudo apt-get install -y clang lld
+          fi
+      # This is the save side: the key matches what check-targets (kind=check) and test (kind=test) restore.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        id: cache
+        with:
+          shared-key: ${{ matrix.triple }}-${{ matrix.kind }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: echo "rust-cache hit - ${{ steps.cache.outputs.cache-hit }}"
+      - name: Build (no tests are run; the merge queue already ran them)
+        env:
+          TRIPLE: ${{ matrix.triple }}
+          KIND: ${{ matrix.kind }}
+          CRATES: ${{ matrix.crates }}
+        run: |
+          set -euo pipefail
+          read -ra pkgs <<<"$CRATES"
+          if [[ "$KIND" == "check" ]]; then
+            cargo check --target "$TRIPLE" --locked "${pkgs[@]}"
+          else
+            cargo nextest run --locked --no-run "${pkgs[@]}"
+          fi
+
+  # ------------------------------------------------------------------ 7. version
+  version:
+    needs: [changes, gates]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    outputs:
+      release: ${{ steps.plan.outputs.release }}
+      components: ${{ steps.plan.outputs.components }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      publish: ${{ steps.plan.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain >/dev/null 2>&1 || rustup toolchain install
+      - name: Compute versions from tags and conventional commits
+        id: plan
+        run: |
+          set -euo pipefail
+          # Source of truth: tags <component>-vX.Y.Z. Nothing is committed and no manifest is edited.
+          conv='^(feat|fix|perf|docs|chore|ci|test|style|refactor|build|revert)(\([^)]+\))?(!)?: .+'
+          head_sha="$(git rev-parse HEAD)"
+          cargo metadata --locked --no-deps --format-version 1 > meta.json
+          released='[]'
+          while IFS= read -r comp; do
+            name="$(jq -r .name <<<"$comp")"
+            pathspecs=()
+            while IFS= read -r glob; do pathspecs+=(":(glob)${glob}"); done < <(jq -r '.paths[]' <<<"$comp")
+            last="$(git tag --list "${name}-v*" --sort=-version:refname | grep -E "^${name}-v[0-9]+\.[0-9]+\.[0-9]+\$" | head -n 1 || true)"
+            reuse=false
+            if [[ -z "$last" ]]; then
+              # No tag yet: the first run releases the version in Cargo.toml.
+              primary="$(jq -r --arg n "$name" '.crates | if any(.[]; . == $n) then $n else .[0] end' <<<"$comp")"
+              version="$(jq -r --arg c "$primary" '.packages[] | select(.name == $c) | .version' meta.json)"
+            else
+              prev_version="${last#"${name}-v"}"
+              if [[ "$(git rev-list -n 1 "$last")" == "$head_sha" ]]; then
+                # Re-run on a tagged commit: reuse the tag, the release step skips what already exists.
+                version="$prev_version"; reuse=true
+              else
+                level=0
+                while IFS= read -r -d $'\x1e' rec; do
+                  subject="${rec%%$'\x1f'*}"; subject="${subject#$'\n'}"
+                  body="${rec#*$'\x1f'}"
+                  l=0
+                  if [[ "$subject" =~ $conv ]]; then
+                    type="${BASH_REMATCH[1]}"
+                    if [[ -n "${BASH_REMATCH[3]}" ]]; then l=3
+                    elif [[ "$type" == feat ]]; then l=2
+                    elif [[ "$type" == fix || "$type" == perf ]]; then l=1
+                    fi
+                  fi
+                  if grep -qE '^BREAKING[ -]CHANGE' <<<"$body"; then l=3; fi
+                  if (( l > level )); then level=$l; fi
+                done < <(git log --format='%s%x1f%b%x1e' "${last}..HEAD" -- "${pathspecs[@]}")
+                if (( level == 0 )); then echo "${name}: no releasable commits since ${last}"; continue; fi
+                IFS=. read -r major minor patch <<<"$prev_version"
+                case "$level" in
+                  3) version="$((major + 1)).0.0" ;;
+                  2) version="${major}.$((minor + 1)).0" ;;
+                  *) version="${major}.${minor}.$((patch + 1))" ;;
+                esac
+              fi
+            fi
+            tag="${name}-v${version}"
+            if [[ "$reuse" == false ]] && git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then reuse=true; fi
+            if gh release view "$tag" >/dev/null 2>&1; then echo "${tag}: already released"; continue; fi
+            echo "${name}: releasing ${version} (previous: ${last:-none}, reuse tag: ${reuse})"
+            released="$(jq -c --argjson comp "$comp" --slurpfile meta meta.json \
+              --arg version "$version" --arg tag "$tag" --arg prev "$last" --argjson reuse "$reuse" '
+              . + [{name: $comp.name, version: $version, tag: $tag, prev: $prev, reuse: $reuse,
+                    crates: $comp.crates, targets: $comp.targets, publish: $comp.publish,
+                    bins: [$meta[0].packages[] | select(.name as $n | $comp.crates | any(.[]; . == $n))
+                           | .targets[] | select(.kind | any(.[]; . == "bin")) | .name]}]' <<<"$released")"
+          done < <(jq -c '.components[] | select(.versioned)' <<<"$CI_CONFIG")
+
+          matrix="$(jq -c --argjson cfg "$CI_CONFIG" '
+            . as $c | {include: [ $cfg.targets[] | . as $t
+              | ($c | map(select(.targets | any(.[]; . == $t.triple)))) as $cs | select(($cs | length) > 0)
+              | {name: $t.name, triple: $t.triple, runner: $t.runner, method: $t.method,
+                 crates: ($cs | map(.crates[] | "-p " + .) | join(" ")),
+                 components: ($cs | map({name, version, bins}))} ]}' <<<"$released")"
+          {
+            echo "release=$(jq 'length > 0' <<<"$released")"
+            echo "components=${released}"
+            echo "matrix=${matrix}"
+            echo "publish=$(jq 'any(.[]; .publish)' <<<"$released")"
+          } >> "$GITHUB_OUTPUT"
+          echo "Release plan:"; jq . <<<"$released"
+          rm -f meta.json
+
+  # ------------------------------------------------------------------- 8. build
+  build:
+    needs: [changes, version]
+    if: github.event_name == 'push' && needs.version.outputs.release == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: true
+      max-parallel: 6
+      matrix: ${{ fromJSON(needs.version.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain >/dev/null 2>&1 || rustup toolchain install
+      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
+        if: matrix.method == 'zigbuild'
+        with:
+          tool: cargo-zigbuild
+          fallback: none
+      - name: Install zig
+        if: matrix.method == 'zigbuild'
+        run: python3 -m pip install ziglang
+      - name: Linker dependencies
+        if: matrix.method == 'native'
+        env:
+          TRIPLE: ${{ matrix.triple }}
+        run: |
+          if [[ "$RUNNER_OS" == "Linux" ]] && grep -qF "[target.${TRIPLE}]" .cargo/config.toml; then
+            sudo apt-get update && sudo apt-get install -y clang lld
+          fi
+      # Release builds have their own key, saved on main only (build only ever runs on main).
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        id: cache
+        with:
+          shared-key: ${{ matrix.triple }}-release
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: echo "rust-cache hit - ${{ steps.cache.outputs.cache-hit }}"
+      - name: Build all released components for this target
+        env:
+          TRIPLE: ${{ matrix.triple }}
+          METHOD: ${{ matrix.method }}
+          CRATES: ${{ matrix.crates }}
+          COMPONENTS: ${{ toJSON(matrix.components) }}
+        run: |
+          set -euo pipefail
+          # Each component's build.rs reads CI_VERSION_<NAME>.
+          while IFS=$'\t' read -r name version; do
+            var="CI_VERSION_$(tr 'a-z-' 'A-Z_' <<<"$name")"
+            export "${var}=${version}"
+          done < <(jq -r '.[] | [.name, .version] | @tsv' <<<"$COMPONENTS")
+          read -ra pkgs <<<"$CRATES"
+          if [[ "$METHOD" == "zigbuild" ]]; then
+            cargo zigbuild --release --locked --target "$TRIPLE" "${pkgs[@]}"
+          else
+            cargo build --release --locked --target "$TRIPLE" "${pkgs[@]}"
+          fi
+      - name: Package archives and SHA256 checksums
+        env:
+          TRIPLE: ${{ matrix.triple }}
+          COMPONENTS: ${{ toJSON(matrix.components) }}
+        run: |
+          set -euo pipefail
+          mkdir dist
+          while IFS= read -r comp; do
+            name="$(jq -r .name <<<"$comp")"; version="$(jq -r .version <<<"$comp")"
+            mapfile -t bins < <(jq -r '.bins[]' <<<"$comp")
+            if (( ${#bins[@]} == 0 )); then continue; fi
+            archive="${name}-${version}-${TRIPLE}.tar.gz"
+            tar -C "target/${TRIPLE}/release" -czf "dist/${archive}" "${bins[@]}"
+            (cd dist && sha256sum "$archive" > "${archive}.sha256")
+          done < <(jq -c '.[]' <<<"$COMPONENTS")
+          ls -l dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-${{ matrix.triple }}
+          path: dist/*
+          if-no-files-found: ignore
+
+  # ----------------------------------------------------------------- 9. release
+  release:
+    needs: [changes, version, build]
+    if: github.event_name == 'push' && needs.version.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      COMPONENTS: ${{ needs.version.outputs.components }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - name: Create tags and GitHub Releases
+        # Tags and releases created with GITHUB_TOKEN do not trigger workflows, so there is no loop.
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          conv='^(feat|fix|perf|docs|chore|ci|test|style|refactor|build|revert)(\([^)]+\))?(!)?: (.+)'
+          while IFS= read -r comp; do
+            name="$(jq -r .name <<<"$comp")"; version="$(jq -r .version <<<"$comp")"
+            tag="$(jq -r .tag <<<"$comp")"; prev="$(jq -r .prev <<<"$comp")"
+            pathspecs=()
+            while IFS= read -r glob; do pathspecs+=(":(glob)${glob}"); done < \
+              <(jq -r --arg n "$name" '.components[] | select(.name == $n) | .paths[]' <<<"$CI_CONFIG")
+            range="HEAD"; if [[ -n "$prev" ]]; then range="${prev}..HEAD"; fi
+
+            # Release notes from conventional commits, grouped by kind.
+            breaking=(); feats=(); fixes=(); perfs=(); others=()
+            while IFS= read -r -d $'\x1e' rec; do
+              subject="${rec%%$'\x1f'*}"; subject="${subject#$'\n'}"; body="${rec#*$'\x1f'}"
+              [[ "$subject" =~ $conv ]] || continue
+              line="- ${BASH_REMATCH[4]}"
+              if [[ -n "${BASH_REMATCH[3]}" ]] || grep -qE '^BREAKING[ -]CHANGE' <<<"$body"; then breaking+=("$line")
+              elif [[ "${BASH_REMATCH[1]}" == feat ]]; then feats+=("$line")
+              elif [[ "${BASH_REMATCH[1]}" == fix ]]; then fixes+=("$line")
+              elif [[ "${BASH_REMATCH[1]}" == perf ]]; then perfs+=("$line")
+              else others+=("${line} (${BASH_REMATCH[1]})"); fi
+            done < <(git log --no-merges --format='%s%x1f%b%x1e' "$range" -- "${pathspecs[@]}")
+            {
+              echo "## ${name} ${version}"
+              section() { local title="$1"; shift; if (( $# > 0 )); then printf '\n### %s\n' "$title"; printf '%s\n' "$@"; fi; }
+              section "Breaking changes" ${breaking[@]+"${breaking[@]}"}
+              section "Features" ${feats[@]+"${feats[@]}"}
+              section "Fixes" ${fixes[@]+"${fixes[@]}"}
+              section "Performance" ${perfs[@]+"${perfs[@]}"}
+              section "Other changes" ${others[@]+"${others[@]}"}
+            } > notes.md
+
+            assets=(dist/"${name}-${version}"-*)
+            if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+              target_flag=(--verify-tag)       # tag exists: reuse it
+            else
+              target_flag=(--target "$GITHUB_SHA")   # creates the tag at the pushed commit
+            fi
+            gh release create "$tag" "${assets[@]}" "${target_flag[@]}" \
+              --title "${name} ${version}" --notes-file notes.md
+          done < <(jq -c '.[]' <<<"$COMPONENTS")
+      - name: Install pinned toolchain
+        if: needs.version.outputs.publish == 'true'
+        run: rustup show active-toolchain >/dev/null 2>&1 || rustup toolchain install
+      # Restore only: the build legs own and save this triple's -release key.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        id: cache
+        if: needs.version.outputs.publish == 'true'
+        with:
+          shared-key: x86_64-unknown-linux-gnu-release
+          save-if: false
+      - name: cache result
+        if: needs.version.outputs.publish == 'true'
+        run: echo "rust-cache hit - ${{ steps.cache.outputs.cache-hit }}"
+      - name: Publish to crates.io
+        if: needs.version.outputs.publish == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          # cargo publishes the version in Cargo.toml (nothing is edited), so a tag that differs is skipped.
+          # The workspace-hack crate (cargo-hakari >= 0.9.9) resolves to the empty crate already on crates.io.
+          while IFS=$'\t' read -r crate version; do
+            manifest="$(cargo metadata --locked --no-deps --format-version 1 |
+              jq -r --arg c "$crate" '.packages[] | select(.name == $c) | .version')"
+            if [[ "$manifest" != "$version" ]]; then
+              echo "::warning::${crate}: Cargo.toml is ${manifest} but the release is ${version}; not publishing"
+              continue
+            fi
+            cargo publish --locked -p "$crate"
+          done < <(jq -r '.[] | select(.publish) | .version as $v | .crates[] | [., $v] | @tsv' <<<"$COMPONENTS")
+
+  # ------------------------------------------------------------------ 10. ci-ok
+  ci-ok:
+    needs: [changes, gates, check-targets, test, msrv, warm-cache, version, build, release]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require no failed or cancelled job
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          # Skipped (skip=true, release=false, or not relevant for this event) counts as passed.
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$RESULTS"
+          if jq -e 'any(.[]; .result == "failure" or .result == "cancelled")' <<<"$RESULTS" >/dev/null; then
+            echo "A required job failed or was cancelled."
+            exit 1
+          fi
