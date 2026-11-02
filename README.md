@@ -81,6 +81,8 @@ For legacy setups and test harnesses, the binary also accepts `JMAP_SESSION_URL`
 
 HTTPS is required for saved accounts. Credentials are sent only to the configured session origin, including discovery redirects and advertised API/upload/download URLs. Fix an incorrect Stalwart public URL rather than silently rewriting it. `JMAP_SDK_ALLOW_HTTP=1` applies only to legacy environment configuration for isolated local tests.
 
+TLS trusts the operating system's certificate store (plus the bundled public roots), and honors `SSL_CERT_FILE` and `SSL_CERT_DIR`. Behind a TLS-intercepting proxy, install the proxy's CA in the system store or point `SSL_CERT_FILE` at it. Outbound proxies are read from `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` (an `https://` server ignores `HTTP_PROXY`).
+
 ## Recovery and limits
 
 A send is durably claimed before `EmailSubmission/set`. After a timeout or process interruption, `uncertain` or `submitting` means **inspect `send_status`; do not resend**. Even no provider records is not proof of failure. A submitted message is accepted for delivery; recipient delivery status is separate. Keep the database across agent restarts. Deleting it, cloning the draft, or submitting through another client is outside the repeat-call guarantee.
