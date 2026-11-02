@@ -341,3 +341,40 @@ async fn archive_preserves_labels_and_stale_state_is_rejected() {
         json!({"mailboxIds/arc":true,"mailboxIds/in":null})
     );
 }
+#[tokio::test]
+async fn unreachable_server_error_names_the_cause_without_leaking_secrets() {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("port")
+        .local_addr()
+        .expect("addr")
+        .port();
+    let dir = tempfile::tempdir().expect("temp");
+    let config = Config {
+        session_url: format!("http://127.0.0.1:{port}/session")
+            .parse()
+            .expect("URL"),
+        username: Some("me@example.com".into()),
+        password: Some("secret-password".into()),
+        bearer: None,
+        account_id: None,
+        database: dir.path().join("state.sqlite"),
+        allow_http: true,
+        max_blob_bytes: 25 * 1024 * 1024,
+    };
+    let error = format!(
+        "{:#}",
+        Jmap::new(config)
+            .expect("jmap")
+            .session()
+            .await
+            .expect_err("closed port")
+    );
+    assert!(
+        error.starts_with("Could not reach JMAP session (connect: "),
+        "{error}"
+    );
+    assert!(
+        !error.contains("secret-password") && !error.contains("127.0.0.1"),
+        "{error}"
+    );
+}

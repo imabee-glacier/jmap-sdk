@@ -9,6 +9,27 @@ use url::Url;
 pub const CORE: &str = "urn:ietf:params:jmap:core";
 pub const MAIL: &str = "urn:ietf:params:jmap:mail";
 pub const SUBMISSION: &str = "urn:ietf:params:jmap:submission";
+/// Keep the message stable but say why: connect, TLS, proxy, DNS or timeout.
+/// The URL is stripped; credentials only ever travel in headers, never in the error.
+fn failure(what: &str, error: reqwest::Error) -> anyhow::Error {
+    use std::error::Error;
+    let error = error.without_url();
+    let mut causes = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(cause) = source {
+        causes.push(cause.to_string());
+        source = cause.source();
+    }
+    causes.dedup();
+    let kind = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else {
+        "request"
+    };
+    anyhow::anyhow!("{what} ({kind}: {})", causes.join(": "))
+}
 #[derive(Clone)]
 pub struct Jmap {
     pub config: Arc<Config>,
@@ -85,7 +106,7 @@ impl Jmap {
                         .auth(self.http.get(url.clone()))
                         .send()
                         .await
-                        .map_err(|_| anyhow::anyhow!("Could not reach JMAP session"))?;
+                        .map_err(|e| failure("Could not reach JMAP session", e))?;
                     if response.status().is_redirection() {
                         let location = response
                             .headers()
@@ -150,7 +171,7 @@ impl Jmap {
             using.push(SUBMISSION);
         }
         let url = self.trusted_url(session["apiUrl"].as_str().context("Missing apiUrl")?)?;
-        let response = self.auth(self.http.post(url)).json(&json!({"using":using,"methodCalls":[[method,args,"0"]]})).send().await.map_err(|_| anyhow::anyhow!("JMAP request interrupted; a write may have completed, inspect status before retrying"))?;
+        let response = self.auth(self.http.post(url)).json(&json!({"using":using,"methodCalls":[[method,args,"0"]]})).send().await.map_err(|e| failure("JMAP request interrupted; a write may have completed, inspect status before retrying", e))?;
         let body = self.json(response).await?;
         let responses = body["methodResponses"]
             .as_array()
@@ -227,7 +248,7 @@ impl Jmap {
             .body(bytes)
             .send()
             .await
-            .map_err(|_| anyhow::anyhow!("Upload interrupted"))?;
+            .map_err(|e| failure("Upload interrupted", e))?;
         let result = self.json(response).await?;
         ensure!(
             result["accountId"] == self.account().await? && result["blobId"].is_string(),
@@ -249,7 +270,7 @@ impl Jmap {
             .auth(self.http.get(self.trusted_url(&url)?))
             .send()
             .await
-            .map_err(|_| anyhow::anyhow!("Download interrupted"))?;
+            .map_err(|e| failure("Download interrupted", e))?;
         self.bytes(response, self.config.max_blob_bytes).await
     }
 }
