@@ -48,11 +48,11 @@ Draft replacement retains the old draft for recovery; trash it after verifying t
 The following commands are for the agent or developer, not the end user. Rust and a C toolchain are needed only to build; SQLite is bundled and TLS uses rustls.
 
 ```sh
-cargo install --locked --git https://github.com/imabee-glacier/jmap-sdk
+curl -fsSL https://raw.githubusercontent.com/imabee-glacier/jmap-sdk/main/install/jmap-sdk.sh | bash
 jmap-sdk tools
 ```
 
-Or from a checkout: `cargo build --release --locked && install -Dm755 target/release/jmap-sdk "$HOME/.local/bin/jmap-sdk"`.
+Or from source: `cargo install --locked --git https://github.com/imabee-glacier/jmap-sdk`, or from a checkout: `cargo build --release --locked && install -Dm755 target/release/jmap-sdk "$HOME/.local/bin/jmap-sdk"`.
 
 Import and inspect accounts:
 

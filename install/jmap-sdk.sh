@@ -6,6 +6,7 @@ set -euo pipefail
 REPO="imabee-glacier/jmap-sdk"
 COMPONENT="jmap-sdk"
 BIN_DIR="${HOME}/.local/bin"
+tmp=""
 
 die() {
   printf 'install: %s\n' "$*" >&2
@@ -39,7 +40,7 @@ main() {
   command -v curl >/dev/null 2>&1 || die "curl is required"
   command -v tar >/dev/null 2>&1 || die "tar is required"
 
-  local triple tag version archive base tmp expected actual
+  local triple tag version archive base expected actual
   triple="$(detect_triple)"
 
   # Newest published ${COMPONENT}-vX.Y.Z release; other components' tags are ignored.
@@ -57,7 +58,7 @@ main() {
   base="https://github.com/${REPO}/releases/download/${tag}"
 
   tmp="$(mktemp -d)"
-  trap 'rm -rf "${tmp}"' EXIT
+  trap 'rm -rf "${tmp:-}"' EXIT
 
   printf 'Installing %s %s (%s)\n' "${COMPONENT}" "${version}" "${triple}"
   curl -fsSL -o "${tmp}/${archive}" "${base}/${archive}" ||
