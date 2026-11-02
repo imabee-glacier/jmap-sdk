@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 struct Fake {
-    url: String,
+    advertised: String,
     email: Arc<Mutex<Value>>,
     calls: Arc<Mutex<Vec<Value>>>,
     submissions: Arc<AtomicUsize>,
@@ -36,7 +36,7 @@ impl Drop for Fixture {
 }
 async fn session(State(f): State<Fake>) -> Json<Value> {
     Json(
-        json!({"capabilities":{CORE:{"maxSizeUpload":26214400},MAIL:{},SUBMISSION:{}},"accounts":{"a":{"accountCapabilities":{MAIL:{},SUBMISSION:{}}}},"primaryAccounts":{MAIL:"a"},"apiUrl":format!("{}/api",f.url),"uploadUrl":format!("{}/upload/{{accountId}}",f.url),"downloadUrl":format!("{}/download/{{accountId}}/{{blobId}}/{{name}}?type={{type}}",f.url)}),
+        json!({"capabilities":{CORE:{"maxSizeUpload":26214400},MAIL:{},SUBMISSION:{}},"accounts":{"a":{"accountCapabilities":{MAIL:{},SUBMISSION:{}}}},"primaryAccounts":{MAIL:"a"},"apiUrl":format!("{}/api",f.advertised),"uploadUrl":format!("{}/upload/{{accountId}}",f.advertised),"downloadUrl":format!("{}/download/{{accountId}}/{{blobId}}/{{name}}?type={{type}}",f.advertised)}),
     )
 }
 async fn api(State(f): State<Fake>, Json(request): Json<Value>) -> axum::response::Response {
@@ -94,12 +94,23 @@ async fn api(State(f): State<Fake>, Json(request): Json<Value>) -> axum::respons
     Json(json!({"methodResponses":[[method,result,"0"]]})).into_response()
 }
 async fn fixture(fail_submission: bool) -> Fixture {
+    fixture_with(fail_submission, false, false).await
+}
+async fn fixture_with(
+    fail_submission: bool,
+    wrong_origin: bool,
+    use_session_origin: bool,
+) -> Fixture {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
     let url = format!("http://{}", listener.local_addr().expect("addr"));
     let fake = Fake {
-        url: url.clone(),
+        advertised: if wrong_origin {
+            "http://wrong.invalid:8443".into()
+        } else {
+            url.clone()
+        },
         email: Arc::new(Mutex::new(
             json!({"id":"e","blobId":"blob","keywords":{"$draft":true},"mailboxIds":{"d/a~b":true},"from":[{"email":"me@example.com"}],"to":[{"email":"friend@example.com"}],"cc":[],"bcc":[{"email":"hidden@example.com"}],"subject":"hello","textBody":[{"partId":"text","type":"text/plain"}],"htmlBody":[],"bodyValues":{"text":{"value":"hello","isTruncated":false,"isEncodingProblem":false}},"attachments":[{"blobId":"attachment","name":"a.bin"}],"bodyStructure":{"type":"multipart/mixed","subParts":[{"partId":"text","type":"text/plain"},{"blobId":"attachment","name":"a.bin","type":"application/octet-stream"}]}}),
         )),
@@ -122,6 +133,7 @@ async fn fixture(fail_submission: bool) -> Fixture {
         account_id: None,
         database: dir.path().join("state.sqlite"),
         allow_http: true,
+        use_session_origin,
         max_blob_bytes: 25 * 1024 * 1024,
     };
     let service = Service {
@@ -359,6 +371,7 @@ async fn unreachable_server_error_names_the_cause_without_leaking_secrets() {
         account_id: None,
         database: dir.path().join("state.sqlite"),
         allow_http: true,
+        use_session_origin: false,
         max_blob_bytes: 25 * 1024 * 1024,
     };
     let error = format!(
@@ -376,5 +389,44 @@ async fn unreachable_server_error_names_the_cause_without_leaking_secrets() {
     assert!(
         !error.contains("secret-password") && !error.contains("127.0.0.1"),
         "{error}"
+    );
+}
+#[tokio::test]
+async fn advertised_wrong_origin_is_refused_unless_opted_in() {
+    let refused = fixture_with(false, true, false).await;
+    let error = refused
+        .service
+        .execute("list_mailboxes", json!({}))
+        .await
+        .expect_err("foreign origin");
+    assert!(
+        format!("{error:#}").contains("different origin"),
+        "{error:#}"
+    );
+    let allowed = fixture_with(false, true, true).await;
+    let mailboxes = allowed
+        .service
+        .execute("list_mailboxes", json!({}))
+        .await
+        .expect("session origin");
+    assert_eq!(mailboxes["state"], "m1");
+    let path = allowed._dir.path().join("blob.bin");
+    std::fs::write(&path, [1u8, 2, 3]).expect("write");
+    let upload = allowed
+        .service
+        .execute(
+            "upload_attachment",
+            json!({"path":path,"content_type":"application/octet-stream"}),
+        )
+        .await
+        .expect("upload via session origin");
+    assert_eq!(upload["blob_id"], "uploaded");
+    // Redirects and userinfo are never rewritten into trust.
+    assert!(
+        allowed
+            .service
+            .jmap
+            .trusted_url("https://other.example/jmap")
+            .is_err()
     );
 }

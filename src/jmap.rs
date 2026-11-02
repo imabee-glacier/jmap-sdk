@@ -59,6 +59,21 @@ impl Jmap {
             )
         }
     }
+    /// URL the server advertised (apiUrl, uploadUrl, downloadUrl). With
+    /// `use_session_origin`, keep its path and query but send it to the session
+    /// origin, for servers whose public URL setting is wrong. Never redirects.
+    fn advertised_url(&self, raw: &str) -> Result<Url> {
+        let mut url = self.config.session_url.join(raw)?;
+        if self.config.use_session_origin {
+            let origin = &self.config.session_url;
+            url.set_scheme(origin.scheme())
+                .map_err(|()| anyhow::anyhow!("Cannot use the session scheme"))?;
+            url.set_host(origin.host_str())?;
+            url.set_port(origin.port())
+                .map_err(|()| anyhow::anyhow!("Cannot use the session port"))?;
+        }
+        self.trusted_url(url.as_str())
+    }
     pub fn trusted_url(&self, raw: &str) -> Result<Url> {
         let url = self.config.session_url.join(raw)?;
         ensure!(
@@ -122,7 +137,7 @@ impl Jmap {
                             && session["capabilities"][MAIL].is_object(),
                         "Server does not advertise JMAP core and mail"
                     );
-                    self.trusted_url(session["apiUrl"].as_str().context("Missing apiUrl")?)?;
+                    self.advertised_url(session["apiUrl"].as_str().context("Missing apiUrl")?)?;
                     return Ok(session);
                 }
                 bail!("Too many JMAP discovery redirects")
@@ -170,7 +185,7 @@ impl Jmap {
             );
             using.push(SUBMISSION);
         }
-        let url = self.trusted_url(session["apiUrl"].as_str().context("Missing apiUrl")?)?;
+        let url = self.advertised_url(session["apiUrl"].as_str().context("Missing apiUrl")?)?;
         let response = self.auth(self.http.post(url)).json(&json!({"using":using,"methodCalls":[[method,args,"0"]]})).send().await.map_err(|e| failure("JMAP request interrupted; a write may have completed, inspect status before retrying", e))?;
         let body = self.json(response).await?;
         let responses = body["methodResponses"]
@@ -241,7 +256,7 @@ impl Jmap {
         );
         let template = session["uploadUrl"].as_str().context("Missing uploadUrl")?;
         let url =
-            self.trusted_url(&template.replace("{accountId}", &encode(&self.account().await?)))?;
+            self.advertised_url(&template.replace("{accountId}", &encode(&self.account().await?)))?;
         let response = self
             .auth(self.http.post(url))
             .header("Content-Type", content_type)
@@ -267,7 +282,7 @@ impl Jmap {
             .replace("{name}", &encode(name))
             .replace("{type}", "application%2Foctet-stream");
         let response = self
-            .auth(self.http.get(self.trusted_url(&url)?))
+            .auth(self.http.get(self.advertised_url(&url)?))
             .send()
             .await
             .map_err(|e| failure("Download interrupted", e))?;

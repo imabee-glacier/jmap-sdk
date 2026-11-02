@@ -11,6 +11,8 @@ pub struct Config {
     pub account_id: Option<String>,
     pub database: PathBuf,
     pub allow_http: bool,
+    /// Send advertised API/upload/download URLs to the session origin instead of refusing them.
+    pub use_session_origin: bool,
     pub max_blob_bytes: usize,
 }
 impl Config {
@@ -37,6 +39,7 @@ impl Config {
                     base.join("jmap-sdk/state.sqlite")
                 }),
             allow_http: env::var("JMAP_SDK_ALLOW_HTTP").as_deref() == Ok("1"),
+            use_session_origin: env::var("JMAP_SDK_USE_SESSION_ORIGIN").as_deref() == Ok("1"),
             max_blob_bytes: 25 * 1024 * 1024,
         };
         config.validate()?;
