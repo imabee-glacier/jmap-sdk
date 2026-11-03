@@ -104,7 +104,21 @@ impl Service {
                 );
                 self.jmap.call("Email/get", json!({"ids":ids,"properties":["id","threadId","from","to","cc","subject","receivedAt","preview","keywords","hasAttachment"]})).await
             }
-            "create_draft" => self.create(parse(input)?, json!({})).await,
+            "create_draft" => {
+                let draft: Draft = parse(input)?;
+                let looks_like_reply = draft
+                    .subject
+                    .trim_start()
+                    .to_ascii_lowercase()
+                    .starts_with("re:");
+                let mut result = self.create(draft, json!({})).await?;
+                if looks_like_reply {
+                    result["warning"] = json!(
+                        "The subject looks like a reply, but create_draft makes a NEW unthreaded message with no quoted original. To answer an existing email, use reply_mail instead (trash this draft)."
+                    );
+                }
+                Ok(result)
+            }
             "reply_mail" => {
                 let args: Reply = parse(input)?;
                 let source = self.jmap.get_email(&args.email_id).await?;

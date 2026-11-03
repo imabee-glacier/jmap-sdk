@@ -587,6 +587,10 @@ pub fn preview(email: &Value, identity_id: &str) -> Result<Value> {
     ] {
         result[field] = email[field].clone();
     }
+    let replying = email["inReplyTo"]
+        .as_array()
+        .is_some_and(|ids| !ids.is_empty());
+    result["kind"] = json!(if replying { "reply" } else { "new" });
     Ok(result)
 }
 
