@@ -32,6 +32,8 @@ pub struct Account {
     pub token: Option<String>,
     #[serde(default)]
     pub account_id: Option<String>,
+    #[serde(default)]
+    pub use_session_origin: bool,
 }
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -250,7 +252,7 @@ impl Accounts {
         let _lock = self.lock()?;
         let vault = self.load()?;
         Ok(
-            json!({"default_account":vault.default_account,"accounts":vault.accounts.values().map(|a|json!({"name":a.name,"session_url":a.session_url,"username":a.username,"account_id":a.account_id,"auth":if a.token.is_some(){"bearer"}else{"password"}})).collect::<Vec<_>>()}),
+            json!({"default_account":vault.default_account,"accounts":vault.accounts.values().map(|a|json!({"name":a.name,"session_url":a.session_url,"username":a.username,"account_id":a.account_id,"use_session_origin":a.use_session_origin,"auth":if a.token.is_some(){"bearer"}else{"password"}})).collect::<Vec<_>>()}),
         )
     }
     pub fn select(&self, name: &str) -> Result<Value> {
@@ -282,6 +284,7 @@ impl Accounts {
             account_id: account.account_id.clone(),
             database: self.directory.join("state.sqlite"),
             allow_http: false,
+            use_session_origin: account.use_session_origin,
             max_blob_bytes: 25 * 1024 * 1024,
         };
         config.validate()?;

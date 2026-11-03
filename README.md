@@ -14,7 +14,7 @@ For credentials, prepare a file using [the account template](examples/accounts.t
 
 Multiple accounts can be imported together. Every mail tool accepts an `account` name; always specify it when working with more than one account. A default can be selected through `select_account`. Modes, send history, and approval snapshots are scoped to the underlying server/mail account.
 
-The import format is JSON with an `accounts` array. Each account has `name`, `session_url`, and either `username` + `password` or `token`. `account_id` is optional for JMAP credentials exposing several accounts. An optional top-level `default_account` chooses the default. Replacing saved credentials requires `replace_existing: true`.
+The import format is JSON with an `accounts` array. Each account has `name`, `session_url`, and either `username` + `password` or `token`. `account_id` is optional for JMAP credentials exposing several accounts. `use_session_origin` is an optional boolean, off by default (see below). An optional top-level `default_account` chooses the default. Replacing saved credentials requires `replace_existing: true`.
 
 Deletion covers the local import file only, not copies retained by an upload service, conversation, backups, or the user's device. We cannot guarantee an attachment won't be processed by the chat platform before the binary receives it. File deletion is not secure erasure.
 
@@ -79,7 +79,13 @@ Atomic replacement, file locking, fsync, and authenticated read-back precede pla
 
 For legacy setups and test harnesses, the binary also accepts `JMAP_SESSION_URL`, `JMAP_TOKEN` or `JMAP_USERNAME`/`JMAP_PASSWORD`, optional `JMAP_ACCOUNT_ID`, and `JMAP_SDK_DATABASE` when no saved account is selected. Saved-account import is the user-facing setup path.
 
-HTTPS is required for saved accounts. Credentials are sent only to the configured session origin, including discovery redirects and advertised API/upload/download URLs. Fix an incorrect Stalwart public URL rather than silently rewriting it. `JMAP_SDK_ALLOW_HTTP=1` applies only to legacy environment configuration for isolated local tests.
+HTTPS is required for saved accounts. Credentials are sent only to the configured session origin, including discovery redirects and advertised API/upload/download URLs. By default a server that advertises a different origin is refused with "JMAP advertised a different origin"; the best fix is the server's public URL setting.
+
+**Overriding a wrong advertised origin.** Some servers sit behind a proxy or load balancer and advertise an internal address (for example `http://mail.example.com:8443/jmap/` while you connect to `https://mail.example.com`). If you cannot fix the server, set `"use_session_origin": true` on the account in the import file, or `JMAP_SDK_USE_SESSION_ORIGIN=1` for the legacy environment configuration. The advertised API, upload and download URLs then keep their path and query but use the scheme, host and port of your `session_url`. Credentials still go only to the origin you configured; discovery redirects to other origins are still refused. Use it only for a server you trust and a `session_url` you typed yourself.
+
+`JMAP_SDK_ALLOW_HTTP=1` applies only to legacy environment configuration for isolated local tests.
+
+TLS trusts the operating system's certificate store (plus the bundled public roots), and honors `SSL_CERT_FILE` and `SSL_CERT_DIR`. Behind a TLS-intercepting proxy, install the proxy's CA in the system store or point `SSL_CERT_FILE` at it. Outbound proxies are read from `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` (an `https://` server ignores `HTTP_PROXY`), including proxy credentials in the proxy URL (`http://user:pass@host:3128`). Failures name their cause, for example `invalid peer certificate: UnknownIssuer` or `proxy authorization required`.
 
 ## Recovery and limits
 
