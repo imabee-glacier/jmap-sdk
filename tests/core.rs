@@ -20,6 +20,7 @@ fn reply(all: bool) -> Reply {
         text: "Reply".into(),
         html: None,
         reply_all: all,
+        quote: false,
         attachments: vec![],
     }
 }
@@ -229,4 +230,67 @@ fn forward_quote_is_human_readable() {
     let html_only =
         json!({"from":[{"email":"ann@example.com"}],"subject":"x","textBody":[],"bodyValues":{}});
     assert!(!forward_quote(&html_only).has_text);
+}
+fn quoted_source() -> Value {
+    json!({"from":[{"email":"ann@example.com","name":"Ann"}],"to":[{"email":"me@example.com"}],"subject":"Plans","sentAt":"2026-11-01T10:00:00Z","messageId":["m@example.com"],"textBody":[{"partId":"1","type":"text/plain"}],"bodyValues":{"1":{"value":"See you <soon> & bring tea\r\n\r\nAnn"}}})
+}
+fn quoting(all: bool) -> Reply {
+    Reply {
+        quote: true,
+        ..reply(all)
+    }
+}
+#[test]
+fn reply_quotes_the_original_with_attribution_and_keeps_threading() {
+    let (draft, headers) = reply_draft(&quoted_source(), quoting(false), &[]).expect("reply");
+    assert_eq!(
+        draft.text,
+        "Reply\n\nOn 2026-11-01T10:00:00Z, Ann <ann@example.com> wrote:\n> See you <soon> & bring tea\n>\n> Ann"
+    );
+    assert!(draft.html.is_none());
+    assert_eq!(headers["inReplyTo"], json!(["m@example.com"]));
+}
+#[test]
+fn html_reply_gets_an_escaped_blockquote() {
+    let mut input = quoting(false);
+    input.html = Some("<p>Reply</p>".into());
+    let (draft, _) = reply_draft(&quoted_source(), input, &[]).expect("reply");
+    let html = draft.html.expect("html");
+    assert!(html.starts_with("<p>Reply</p>"));
+    assert!(html.contains("<blockquote"));
+    assert!(html.contains("See you &lt;soon&gt; &amp; bring tea<br><br>Ann"));
+    assert!(!html.contains("<soon>"));
+}
+#[test]
+fn html_only_original_is_quoted_as_text_without_markup_or_scripts() {
+    let source = json!({"from":[{"email":"ann@example.com"}],"subject":"x","textBody":[{"partId":"1","type":"text/html"}],"bodyValues":{"1":{"value":"<style>p{color:red}</style><p>Hello&nbsp;<b>there</b></p><script>alert(1)</script><div>Bye &amp; thanks</div>"}}});
+    let (draft, _) = reply_draft(&source, quoting(false), &[]).expect("reply");
+    assert!(
+        draft.text.ends_with("> Hello there\n>\n> Bye & thanks"),
+        "{}",
+        draft.text
+    );
+    assert!(
+        !draft.text.contains("alert") && !draft.text.contains("color") && !draft.text.contains('<')
+    );
+}
+#[test]
+fn quoting_refuses_a_truncated_original_but_quote_false_still_works() {
+    let source = json!({"from":[{"email":"ann@example.com"}],"subject":"x","textBody":[{"partId":"1","type":"text/plain"}],"bodyValues":{"1":{"value":"part","isTruncated":true}}});
+    assert!(reply_draft(&source, quoting(false), &[]).is_err());
+    let (draft, _) = reply_draft(&source, reply(false), &[]).expect("no quote");
+    assert_eq!(draft.text, "Reply");
+}
+#[test]
+fn empty_original_adds_no_quote_block() {
+    let source =
+        json!({"from":[{"email":"ann@example.com"}],"subject":"x","textBody":[],"bodyValues":{}});
+    let (draft, _) = reply_draft(&source, quoting(false), &[]).expect("reply");
+    assert_eq!(draft.text, "Reply");
+}
+#[test]
+fn reply_quotes_by_default_and_schema_says_so() {
+    let input: Reply = serde_json::from_value(json!({"email_id":"e","identity_id":"i","text":"t"}))
+        .expect("reply");
+    assert!(input.quote);
 }
