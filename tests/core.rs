@@ -294,3 +294,29 @@ fn reply_quotes_by_default_and_schema_says_so() {
         .expect("reply");
     assert!(input.quote);
 }
+#[test]
+fn preview_says_whether_it_is_a_reply_or_a_new_message() {
+    let body = json!({"bodyValues":{"t":{"value":"x"}},"textBody":[{"partId":"t"}]});
+    let mut reply = body.clone();
+    reply["inReplyTo"] = json!(["m@example.com"]);
+    assert_eq!(preview(&reply, "i").expect("reply")["kind"], "reply");
+    assert_eq!(preview(&body, "i").expect("new")["kind"], "new");
+}
+#[test]
+fn tool_descriptions_tell_the_agent_when_to_reply_or_start_new() {
+    let text = |name: &str| {
+        jmap_sdk::transport::definitions()
+            .into_iter()
+            .find(|d| d["name"] == name)
+            .expect("tool")["description"]
+            .as_str()
+            .expect("text")
+            .to_owned()
+    };
+    assert!(
+        text("create_draft").contains("NEW message") && text("create_draft").contains("reply_mail")
+    );
+    assert!(text("reply_mail").contains("ANSWERING"));
+    assert!(text("forward_mail").contains("pass an existing email on"));
+    assert!(text("prepare_send").contains("kind"));
+}

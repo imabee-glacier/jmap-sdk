@@ -430,3 +430,24 @@ async fn advertised_wrong_origin_is_refused_unless_opted_in() {
             .is_err()
     );
 }
+#[tokio::test]
+async fn re_subject_in_create_draft_warns_and_new_messages_do_not() {
+    let f = fixture(false).await;
+    let args = |subject: &str| json!({"identity_id":"i","to":[{"email":"friend@example.com"}],"subject":subject,"text":"Hello"});
+    let fake_reply = f
+        .service
+        .execute("create_draft", args("Re: Lunch"))
+        .await
+        .expect("draft");
+    assert!(
+        fake_reply["warning"]
+            .as_str()
+            .is_some_and(|w| w.contains("reply_mail"))
+    );
+    let new = f
+        .service
+        .execute("create_draft", args("Lunch?"))
+        .await
+        .expect("draft");
+    assert!(new.get("warning").is_none());
+}
