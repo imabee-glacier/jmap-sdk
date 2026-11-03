@@ -4,10 +4,10 @@ What has been checked, and what has not. Last run: 2026-11-02, Linux x86_64, Rus
 
 ## Automated (repeatable, no network)
 
-`cargo test --locked --all-targets` runs 30 tests:
+`cargo test --locked --all-targets` runs 38 tests:
 
-- **core** (15): reply/reply-all recipient rules (Reply-To preference, own-identity and duplicate exclusion, no Bcc leakage), threading headers, MIME tree for text+HTML, inline CID images and regular attachments, header-injection rejection, truncated-body refusal, manual-mode confirmation and preview-hash matching, idempotent and account-scoped prepare, cancel and re-prepare, durable claims across restarts and separate connections, preview expiry, readable forward header block, MCP schema validity, and `send_draft` annotated as destructive.
-- **protocol** (9, against an in-process fake JMAP server): one submission per intent under duplicate and concurrent calls, upstream failure after submission recorded as `uncertain` and never retried, changed recipient or wrong identity blocks a send, autonomous mode skips only the application confirmation, compose never submits, search pagination, attachment byte round trip without overwriting files, refusal to send credentials to a foreign advertised origin, and archive preserving labels with stale state rejected.
+- **core** (21): reply quoting (attribution, `> ` prefixes, escaped HTML blockquote, HTML-only originals converted to text, truncated originals refused, `quote: false`), reply/reply-all recipient rules (Reply-To preference, own-identity and duplicate exclusion, no Bcc leakage), threading headers, MIME tree for text+HTML, inline CID images and regular attachments, header-injection rejection, truncated-body refusal, manual-mode confirmation and preview-hash matching, idempotent and account-scoped prepare, cancel and re-prepare, durable claims across restarts and separate connections, preview expiry, readable forward header block, MCP schema validity, and `send_draft` annotated as destructive.
+- **protocol** (11, against an in-process fake JMAP server): network errors name their cause without leaking secrets, the `use_session_origin` override (refused by default, honored when opted in), one submission per intent under duplicate and concurrent calls, upstream failure after submission recorded as `uncertain` and never retried, changed recipient or wrong identity blocks a send, autonomous mode skips only the application confirmation, compose never submits, search pagination, attachment byte round trip without overwriting files, refusal to send credentials to a foreign advertised origin, and archive preserving labels with stale state rejected.
 - **accounts** (6): multi-account import, encryption, authenticated read-back, and plaintext deletion; invalid imports redacted and the source kept; wrong key or tampering fails closed; replacement requires `replace_existing`; duplicate names do not partially import; account tools work without credentials or network.
 
 `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` are clean.
@@ -36,3 +36,4 @@ MCP stdio: `initialize` reports `jmap-sdk`, `tools/list` returns 25 tools, and `
 - Providers other than Stalwart (Fastmail and others). The client follows RFC 8621 but has only been run against Stalwart.
 - Bearer-token accounts against a live server (they are covered only by unit tests). OAuth refresh is not implemented.
 - Attachments near the 25 MiB limit on a live server.
+- Reply quoting against a live server (covered by unit tests only), and the proxy, private-CA and `use_session_origin` path against the real `m.appsynergy.io` (tested with a local CONNECT proxy, private CA and fake server).

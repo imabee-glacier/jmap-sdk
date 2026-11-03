@@ -41,7 +41,7 @@ The practical balance is free reading, sorting, and drafting; review before send
 - Full send previews including Bcc, identity, body, attachment metadata, and immutable blob identifiers; 15-minute expiry.
 - Durable SQLite submission claims, repeat-call protection, delivery status, cancellation of unsent intents, and a send/mode audit log.
 
-Draft replacement retains the old draft for recovery; trash it after verifying the replacement. Forwarding attaches the complete original by default. Reply text is supplied explicitly, including any desired quoted text/signature. There is no permanent deletion, scheduling, contact/calendar management, or S/MIME/PGP signing/decryption in this version.
+Draft replacement retains the old draft for recovery; trash it after verifying the replacement. Forwarding attaches the complete original by default. Replies quote the original below your text by default (`quote: false` turns that off); supply only your new text and signature. There is no permanent deletion, scheduling, contact/calendar management, or S/MIME/PGP signing/decryption in this version.
 
 ## Agent/developer installation
 

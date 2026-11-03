@@ -70,6 +70,9 @@ pub struct Reply {
     pub html: Option<String>,
     #[serde(default)]
     pub reply_all: bool,
+    /// Quote the original message below your text, as a normal reply does. Default true.
+    #[serde(default = "yes")]
+    pub quote: bool,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
 }
@@ -299,6 +302,27 @@ pub fn reply_draft(source: &Value, input: Reply, own: &[Address]) -> Result<(Dra
     if !refs.is_empty() {
         headers["references"] = json!(refs);
     }
+    let (mut text, mut html) = (input.text, input.html);
+    if input.quote {
+        full_body(source)
+            .context("Cannot quote the original completely; set quote=false to reply without it")?;
+        let quote = reply_quote(source);
+        if !quote.body.is_empty() {
+            text = format!(
+                "{}\n\n{}\n{}",
+                text.trim_end(),
+                quote.attribution,
+                quote.text
+            );
+            if let Some(html) = html.as_mut() {
+                html.push_str(&format!(
+                    "<br><br><div>{}</div><blockquote type=\"cite\" style=\"margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex\">{}</blockquote>",
+                    escape_html(&quote.attribution),
+                    escape_html(&quote.body).replace('\n', "<br>")
+                ));
+            }
+        }
+    }
     Ok((
         Draft {
             identity_id: input.identity_id,
@@ -307,12 +331,132 @@ pub fn reply_draft(source: &Value, input: Reply, own: &[Address]) -> Result<(Dra
             bcc: vec![],
             reply_to: None,
             subject,
-            text: input.text,
-            html: input.html,
+            text,
+            html,
             attachments: input.attachments,
         },
         headers,
     ))
+}
+pub struct ReplyQuote {
+    pub attribution: String,
+    pub body: String,
+    pub text: String,
+}
+/// "On <date>, <sender> wrote:" and the original plain text, each line prefixed with "> ".
+pub fn reply_quote(source: &Value) -> ReplyQuote {
+    let body = plain_body(source);
+    let who = format_addresses(&addresses(source, "from"));
+    let when = source["sentAt"]
+        .as_str()
+        .or_else(|| source["receivedAt"].as_str());
+    let attribution = match (when, who.is_empty()) {
+        (Some(when), false) => format!("On {when}, {who} wrote:"),
+        (Some(when), true) => format!("On {when}, the sender wrote:"),
+        (None, false) => format!("{who} wrote:"),
+        (None, true) => "The original message:".to_owned(),
+    };
+    let text = body
+        .lines()
+        .map(|line| {
+            if line.is_empty() {
+                ">".to_owned()
+            } else {
+                format!("> {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    ReplyQuote {
+        attribution,
+        body,
+        text,
+    }
+}
+/// Readable text of the original. HTML-only messages are converted to text, never embedded as HTML.
+fn plain_body(source: &Value) -> String {
+    let parts = source["textBody"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| {
+            let value = source["bodyValues"][p["partId"].as_str()?]["value"].as_str()?;
+            Some(if p["type"] == "text/html" {
+                html_to_text(value)
+            } else {
+                value.to_owned()
+            })
+        })
+        .collect::<Vec<_>>();
+    parts
+        .join("\n")
+        .replace("\r\n", "\n")
+        .trim_matches('\n')
+        .to_owned()
+}
+fn html_to_text(html: &str) -> String {
+    let mut out = String::new();
+    let mut rest = html;
+    while let Some(start) = rest.find('<') {
+        out.push_str(&rest[..start]);
+        rest = &rest[start..];
+        let Some(end) = rest.find('>') else {
+            rest = "";
+            break;
+        };
+        let tag = rest[1..end].to_ascii_lowercase();
+        let closing = tag.starts_with('/');
+        let name = tag
+            .trim_start_matches('/')
+            .split(|c: char| c.is_whitespace() || c == '/')
+            .next()
+            .unwrap_or_default();
+        rest = &rest[end + 1..];
+        if !closing && matches!(name, "script" | "style") {
+            // Drop everything up to the matching close tag.
+            let close = format!("</{name}");
+            rest = match rest.to_ascii_lowercase().find(&close) {
+                Some(at) => &rest[at..],
+                None => "",
+            };
+        } else if matches!(
+            name,
+            "br" | "p"
+                | "div"
+                | "li"
+                | "tr"
+                | "blockquote"
+                | "h1"
+                | "h2"
+                | "h3"
+                | "h4"
+                | "h5"
+                | "h6"
+        ) {
+            out.push('\n');
+        }
+    }
+    out.push_str(rest);
+    let decoded = out
+        .replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&");
+    let mut lines: Vec<&str> = Vec::new();
+    for line in decoded.lines().map(str::trim_end) {
+        if !(line.is_empty() && lines.last().is_none_or(|l| l.is_empty())) {
+            lines.push(line);
+        }
+    }
+    lines.join("\n").trim().to_owned()
+}
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 pub fn build_email(draft: &Draft, from: Address, mailbox: &str, headers: Value) -> Result<Value> {
     from.validate()?;

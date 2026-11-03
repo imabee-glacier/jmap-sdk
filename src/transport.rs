@@ -55,7 +55,7 @@ pub fn definitions() -> Vec<Value> {
         ),
         tool::<Reply>(
             "reply_mail",
-            "Create a reply draft with Reply-To handling, threading headers and optional reply-all. Excludes own identities and Bcc. Never sends. Body should include any desired quotation.",
+            "Create a reply draft with Reply-To handling, threading headers and optional reply-all. Excludes own identities and Bcc. Quotes the original message below your text by default (attribution line and \"> \" quoted text, plus a blockquote when you supply HTML); pass quote=false to omit it. Never sends. Write only your new text; do not paste the original yourself.",
             false,
             false,
         ),

@@ -26,7 +26,7 @@ Use `modify_mail` for read/starred changes and labels, and `move_mail` for archi
 
 Use a listed sender identity. Upload attachments from files already in your Linux filesystem, then pass the returned blob ids, names, and MIME types to the draft operation. Do not pass paths from the user's phone as if they existed in the VM. Keep the account consistent throughout upload, composition, preview, and sending.
 
-`reply_mail` handles reply and reply-all threading and recipient selection. Supply the actual body, quotation, and signature desired. `forward_mail` preserves the original as an attached `.eml` by default. `replace_draft` creates a new id; review the new draft and trash the old one when appropriate. Never reuse the old send intent for the replacement.
+`reply_mail` handles reply and reply-all threading and recipient selection. The original message is quoted below your text by default (an "On <date>, <sender> wrote:" line, then the original with `> ` prefixes, plus a blockquote when you supply HTML); pass `quote: false` to omit it. Supply only your new text and signature. `forward_mail` preserves the original as an attached `.eml` by default. `replace_draft` creates a new id; review the new draft and trash the old one when appropriate. Never reuse the old send intent for the replacement.
 
 ## Send workflow
 
